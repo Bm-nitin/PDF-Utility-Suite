@@ -280,6 +280,16 @@ def compress_pdf(
     if level not in COMPRESSION_PRESETS:
         raise PDFEngineError(f"Unknown compression level: {level}")
 
+    # Phase 10: re-validate before processing, exactly like merge_pdfs()
+    # already does for each of its inputs. This is what turns "the file
+    # vanished/became corrupted/became password-protected since it was
+    # imported" into the same clear, specific message
+    # (InvalidPDFError/EncryptedPDFError) used everywhere else in the
+    # app, instead of a generic "Compression failed: <raw pymupdf
+    # internal error>" that could otherwise surface from deeper inside
+    # this function for the same underlying problem.
+    validate_pdf(input_path)
+
     preset = COMPRESSION_PRESETS[level]
 
     try:

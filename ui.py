@@ -128,8 +128,20 @@ def prepare_import(
     seen = set(existing_paths)
 
     for raw_path in paths:
-        path = Path(raw_path)
-        resolved = path.resolve()
+        try:
+            path = Path(raw_path)
+            resolved = path.resolve()
+        except Exception:
+            # Defense in depth: Path construction/resolution can fail on
+            # genuinely malformed input (e.g. certain reserved names or
+            # malformed UNC paths on Windows). One bad path must not
+            # abort the rest of the batch, same as any other per-file
+            # failure below.
+            errors.append((
+                Path(str(raw_path)),
+                f"'{raw_path}' is not a valid file path.",
+            ))
+            continue
 
         if resolved in seen:
             skipped_duplicates.append(path)
@@ -137,6 +149,7 @@ def prepare_import(
 
         try:
             info = pdf_engine.get_pdf_info(path)
+            pdf_file = models.PDFFile(**info)
         except pdf_engine.PDFEngineError as exc:
             errors.append((path, str(exc)))
             continue
@@ -150,7 +163,7 @@ def prepare_import(
             )
             continue
 
-        added.append(models.PDFFile(**info))
+        added.append(pdf_file)
         seen.add(resolved)
 
     return {
@@ -691,8 +704,29 @@ class MainWindow:
         """Runs on a background thread. Must not touch any tkinter widget
         -- only pdf_engine (pure/file-system work) and the thread-safe
         queue are used here.
+
+        Phase 10: wraps prepare_import() in a top-level try/except as
+        defense in depth. prepare_import() already catches every
+        per-file failure internally (see its own docstring), but if a
+        future change ever introduces a bug that lets something escape
+        anyway, this is what stands between that and a permanently
+        hung "Validating..." state: without it, an uncaught exception
+        here would never reach the queue, _poll_import_queue would spin
+        forever waiting for an item that never arrives, and
+        _import_in_progress would stay True forever -- freezing the
+        import-related buttons for the rest of the session.
         """
-        results = prepare_import(paths, existing_paths)
+        try:
+            results = prepare_import(paths, existing_paths)
+        except Exception:
+            results = {
+                "added": [],
+                "skipped_duplicates": [],
+                "errors": [
+                    (Path(str(p)), "An unexpected error occurred while importing this file.")
+                    for p in paths
+                ],
+            }
         self._import_queue.put(results)
 
     def _poll_import_queue(self) -> None:
