@@ -1,0 +1,43 @@
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Build / packaging
+build/
+dist/
+*.spec
+
+# Generated outputs
+temp/*
+output/*
+!temp/.gitkeep
+!output/.gitkeep
+
+# Generated executables / archives
+*.exe
+*.zip
+
+# IDE / editor
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Runtime logs
+*.log
+
+# Development scripts
+create_phase2_files.ps1
