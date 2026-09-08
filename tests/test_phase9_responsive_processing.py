@@ -173,6 +173,33 @@ def test_merge_compress_worker_runs_off_main_thread(window, pdf_files, tmp_path)
 # ---------------------------------------------------------------------------
 
 def test_gui_remains_responsive_during_merge(window, tmp_path):
+    """Proves the main thread keeps pumping Tkinter events while a merge
+    is genuinely in flight, deterministically.
+
+    The original version of this test relied on wall-clock timing: it
+    started a real merge of 300 synthetic pages and counted how many
+    root.update() iterations ran before the merge finished on its own,
+    asserting that count exceeded an arbitrary threshold. That made the
+    test's outcome depend on how fast the real merge happened to run
+    relative to the polling loop's real sleep() calls -- which varies
+    with machine speed, CPU load, and (as observed) which other tests
+    ran earlier in the same process (warm caches, GC state, etc.). On a
+    sufficiently fast run, the merge could complete in fewer than 4
+    polling iterations, failing the ">3" assertion even though the GUI
+    was never actually blocked -- a false failure, not a real
+    regression.
+
+    This version uses the same deterministic _GatedCall mechanism
+    already used elsewhere in this file (e.g.
+    test_all_action_buttons_disabled_while_merge_runs) to hold
+    pdf_engine.merge_pdfs paused on a threading.Event we control
+    directly. This decouples "is the merge still in flight" from real
+    merge speed entirely: the merge is *provably* still running for as
+    long as the test chooses to withhold the gate release, so pumping
+    the event loop a fixed number of times while the gate is held is a
+    genuine, unconditional proof of responsiveness -- not a race against
+    how long real work happens to take.
+    """
     def make(path, pages):
         doc = pymupdf.open()
         for _ in range(pages):
@@ -180,25 +207,49 @@ def test_gui_remains_responsive_during_merge(window, tmp_path):
         doc.save(path)
         doc.close()
 
-    p1 = tmp_path / "big1.pdf"
-    p2 = tmp_path / "big2.pdf"
-    make(p1, 150)
-    make(p2, 150)
+    p1 = tmp_path / "a.pdf"
+    p2 = tmp_path / "b.pdf"
+    make(p1, 3)
+    make(p2, 4)
 
     _import(window, [p1, p2])
     output = tmp_path / "out.pdf"
 
-    update_count = 0
-    with patch("file_manager.save_pdf_file", return_value=output):
-        window._on_merge_only_clicked()
-        deadline = time.time() + 20
-        while window._merge_in_progress and time.time() < deadline:
-            window.root.update()
-            update_count += 1
-            time.sleep(0.005)
+    gate = _GatedCall(pdf_engine.merge_pdfs)
+    with patch.object(pdf_engine, "merge_pdfs", side_effect=gate):
+        with patch("file_manager.save_pdf_file", return_value=output):
+            window._on_merge_only_clicked()
 
-    assert update_count > 3, "main thread must keep pumping events during merge"
+            # Wait for the worker thread to genuinely start and block
+            # inside the gate -- not a guess, an actual synchronization
+            # point.
+            assert gate.entered.wait(timeout=5), "worker never started"
+
+            # The merge is now provably paused mid-flight (held open by
+            # the gate). Pump the main thread's event loop a fixed,
+            # deterministic number of times. If the main thread were
+            # blocked waiting on the worker (i.e. not actually
+            # backgrounded), this loop simply could not execute at all
+            # while the gate is held -- there is no way for this to pass
+            # by luck.
+            update_count = 0
+            for _ in range(20):
+                window.root.update()
+                update_count += 1
+
+            assert window._merge_in_progress, (
+                "the merge must still be genuinely in flight at this point"
+            )
+            assert update_count == 20, "main thread must keep pumping events during merge"
+
+            # Now let the real merge actually run to completion and
+            # verify the operation still finishes correctly.
+            gate.release()
+            assert _pump_until(window, lambda: not window._merge_in_progress)
+
     assert output.exists()
+    with pymupdf.open(output) as doc:
+        assert doc.page_count == 7  # 3 + 4, confirms the real merge ran correctly
 
 
 # ---------------------------------------------------------------------------
