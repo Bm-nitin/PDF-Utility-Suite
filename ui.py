@@ -73,6 +73,7 @@ from tkinter import messagebox, ttk
 import file_manager
 import models
 import pdf_engine
+import tool_registry
 from config import APP_NAME, APP_VERSION
 
 # ---------------------------------------------------------------------------
@@ -213,6 +214,12 @@ class MainWindow:
         self.pages_count_var = tk.StringVar(value="Pages: 0")
         self.size_var = tk.StringVar(value="Size: 0 B")
 
+        # Phase 12: which tool is currently shown in the workspace.
+        # Starts on the default tool (Merge & Compress) so the app opens
+        # exactly where it always has.
+        self.current_tool_id: str = tool_registry.DEFAULT_TOOL_ID
+        self.tool_nav_buttons: Dict[str, tk.Widget] = {}
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -223,8 +230,11 @@ class MainWindow:
 
     def _configure_window(self) -> None:
         self.root.title(APP_NAME)
-        self.root.geometry("780x820")
-        self.root.minsize(680, 800)
+        # Phase 12: widened to fit the new tool navigation sidebar. The
+        # Merge & Compress workspace itself keeps its original size and
+        # layout -- only the window grew to make room alongside it.
+        self.root.geometry("960x820")
+        self.root.minsize(860, 800)
         self.root.configure(bg=COLOR_BG)
 
     def _configure_styles(self) -> None:
@@ -317,9 +327,23 @@ class MainWindow:
     # ------------------------------------------------------------------
 
     def _build_layout(self) -> None:
-        outer = tk.Frame(self.root, bg=COLOR_BG)
-        outer.pack(fill="both", expand=True, padx=28, pady=24)
+        # Phase 12: a persistent navigation sidebar on the left, and a
+        # workspace area on the right whose content switches based on
+        # the selected tool. The Merge & Compress workspace below is
+        # built exactly as it always has been (same methods, same
+        # widgets, same attribute names) -- it's just now placed inside
+        # self.merge_compress_view instead of directly under the root.
+        shell = tk.Frame(self.root, bg=COLOR_BG)
+        shell.pack(fill="both", expand=True)
 
+        self._build_tool_navigation(shell)
+
+        self.workspace_container = tk.Frame(shell, bg=COLOR_BG)
+        self.workspace_container.pack(side="left", fill="both", expand=True)
+
+        self.merge_compress_view = tk.Frame(self.workspace_container, bg=COLOR_BG)
+
+        outer = self.merge_compress_view
         self._build_header(outer)
         self._build_dropzone(outer)
         self._build_file_list(outer)
@@ -328,6 +352,154 @@ class MainWindow:
         self._build_compression_controls(outer)
         self._build_action_buttons(outer)
         self._build_status_area(outer)
+
+        self._build_coming_soon_view(self.workspace_container)
+
+        self._select_tool(self.current_tool_id)
+
+    def _build_tool_navigation(self, parent: tk.Widget) -> None:
+        """A simple, always-visible sidebar listing every registered
+        tool (tool_registry.get_all_tools()), so switching tools never
+        means scattering tool names through ui.py -- this is the only
+        place that reads the registry to build the tool list.
+        """
+        nav = tk.Frame(parent, bg=COLOR_CARD, width=200)
+        nav.pack(side="left", fill="y")
+        nav.pack_propagate(False)  # keep the fixed width regardless of content
+        self._nav_frame = nav
+
+        title = tk.Label(
+            nav,
+            text="PDF TOOLS",
+            font=("Segoe UI", 10, "bold"),
+            bg=COLOR_CARD,
+            fg=COLOR_TEXT_MUTED,
+            anchor="w",
+        )
+        title.pack(fill="x", padx=16, pady=(20, 8))
+
+        for tool in tool_registry.get_all_tools():
+            self._build_tool_nav_button(nav, tool)
+
+    def _build_tool_nav_button(self, parent: tk.Widget, tool: "tool_registry.Tool") -> None:
+        is_selected = tool.id == self.current_tool_id
+        fg = COLOR_ACCENT if is_selected else (
+            COLOR_TEXT_PRIMARY if tool.is_available else COLOR_TEXT_MUTED
+        )
+        bg = "#eef2ff" if is_selected else COLOR_CARD
+
+        row = tk.Frame(parent, bg=bg)
+        row.pack(fill="x")
+
+        label_text = tool.name if tool.is_available else f"{tool.name}"
+        btn = tk.Label(
+            row,
+            text=label_text,
+            font=("Segoe UI", 10, "bold" if is_selected else "normal"),
+            bg=bg,
+            fg=fg,
+            anchor="w",
+            padx=16,
+            pady=10,
+            cursor="hand2",
+        )
+        btn.pack(fill="x")
+        btn.bind("<Button-1>", lambda _event, tid=tool.id: self._select_tool(tid))
+
+        if not tool.is_available:
+            badge = tk.Label(
+                row,
+                text="Coming soon",
+                font=("Segoe UI", 8),
+                bg=bg,
+                fg=COLOR_TEXT_MUTED,
+                anchor="w",
+                padx=16,
+            )
+            badge.pack(fill="x", pady=(0, 6))
+
+        self.tool_nav_buttons[tool.id] = row
+
+    def _build_coming_soon_view(self, parent: tk.Widget) -> None:
+        """A single, generic placeholder view shared by every
+        not-yet-implemented tool -- Phase 12 builds this once, per the
+        instruction to create architecture/placeholders without
+        implementing the future operations themselves. Its text is
+        updated per-tool by _select_tool()/_update_coming_soon_view().
+        """
+        self.coming_soon_view = tk.Frame(parent, bg=COLOR_BG)
+
+        inner = tk.Frame(self.coming_soon_view, bg=COLOR_BG)
+        inner.pack(expand=True)
+
+        self.coming_soon_title_label = tk.Label(
+            inner,
+            text="",
+            font=("Segoe UI", 18, "bold"),
+            bg=COLOR_BG,
+            fg=COLOR_TEXT_PRIMARY,
+        )
+        self.coming_soon_title_label.pack(pady=(0, 8))
+
+        self.coming_soon_desc_label = tk.Label(
+            inner,
+            text="",
+            font=("Segoe UI", 11),
+            bg=COLOR_BG,
+            fg=COLOR_TEXT_SECONDARY,
+            wraplength=420,
+            justify="center",
+        )
+        self.coming_soon_desc_label.pack(pady=(0, 16))
+
+        badge = tk.Label(
+            inner,
+            text="COMING SOON",
+            font=("Segoe UI", 9, "bold"),
+            bg="#eef0f3",
+            fg=COLOR_TEXT_MUTED,
+            padx=12,
+            pady=6,
+        )
+        badge.pack()
+
+    def _update_coming_soon_view(self, tool: "tool_registry.Tool") -> None:
+        self.coming_soon_title_label.configure(text=tool.name)
+        self.coming_soon_desc_label.configure(text=tool.description)
+
+    def _select_tool(self, tool_id: str) -> None:
+        """Switches the workspace to show the given tool. Unknown tool
+        ids are a safe no-op -- selecting a tool that doesn't exist
+        (e.g. a stale id) must never crash or blank the workspace.
+        """
+        tool = tool_registry.get_tool(tool_id)
+        if tool is None:
+            return
+
+        self.current_tool_id = tool_id
+
+        self.merge_compress_view.pack_forget()
+        self.coming_soon_view.pack_forget()
+
+        if tool.is_available:
+            self.merge_compress_view.pack(fill="both", expand=True, padx=28, pady=24)
+        else:
+            self._update_coming_soon_view(tool)
+            self.coming_soon_view.pack(fill="both", expand=True, padx=28, pady=24)
+
+        self._refresh_tool_nav_highlight()
+
+    def _refresh_tool_nav_highlight(self) -> None:
+        """Rebuilds the sidebar so the currently-selected tool is
+        visually highlighted. Simpler and less error-prone than trying
+        to update colors on a variable number of already-built label
+        widgets in place, and this sidebar is small/cheap to rebuild.
+        """
+        for row in self.tool_nav_buttons.values():
+            row.destroy()
+        self.tool_nav_buttons.clear()
+        for tool in tool_registry.get_all_tools():
+            self._build_tool_nav_button(self._nav_frame, tool)
 
     def _build_header(self, parent: tk.Widget) -> None:
         header = tk.Frame(parent, bg=COLOR_BG)
