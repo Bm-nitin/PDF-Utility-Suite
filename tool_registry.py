@@ -57,7 +57,7 @@ class Tool:
 # Registry
 # ---------------------------------------------------------------------------
 # One entry per operation the app supports or plans to support. Adding a
-# future tool (Split, Rotate, etc.) to the app starts here: add one Tool
+# future tool (Rotate, Watermark, etc.) to the app starts here: add one Tool
 # entry with status=STATUS_COMING_SOON now, and flip it to
 # STATUS_AVAILABLE once that tool's real UI/processing lands in a later
 # phase -- no other file needs to know the tool's name, id, or
@@ -78,7 +78,7 @@ SPLIT = Tool(
     id="split",
     name="Split PDF",
     description="Split a PDF into multiple smaller files.",
-    status=STATUS_COMING_SOON,
+    status=STATUS_AVAILABLE,
     category="organize",
 )
 

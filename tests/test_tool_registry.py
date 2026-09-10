@@ -55,18 +55,17 @@ def test_tool_is_immutable():
 # Registry contents
 # ---------------------------------------------------------------------------
 
-def test_merge_compress_is_the_only_available_tool():
-    """Phase 12 explicitly does not implement any new PDF operations --
-    Merge & Compress must be the only tool marked available.
+def test_merge_compress_and_split_are_the_available_tools():
+    """Phase 13 makes Split PDF the second real, working tool. Every
+    other future tool remains coming_soon until its own phase.
     """
-    available = [t for t in tool_registry.get_all_tools() if t.is_available]
-    assert len(available) == 1
-    assert available[0].id == "merge_compress"
+    available_ids = {t.id for t in tool_registry.get_all_tools() if t.is_available}
+    assert available_ids == {"merge_compress", "split"}
 
 
-def test_all_ten_future_tools_are_registered_as_coming_soon():
+def test_nine_future_tools_are_registered_as_coming_soon():
     expected_ids = {
-        "split", "remove_pages", "extract_pages", "organize_pages",
+        "remove_pages", "extract_pages", "organize_pages",
         "rotate", "protect", "unlock", "page_numbers", "watermark",
         "images_to_pdf",
     }
@@ -148,7 +147,8 @@ def test_split_tool_specifically_registered():
     tool = tool_registry.get_tool("split")
     assert tool is not None
     assert tool.name == "Split PDF"
-    assert tool.status == STATUS_COMING_SOON
+    assert tool.status == STATUS_AVAILABLE
+    assert tool.is_available
 
 
 def test_images_to_pdf_tool_specifically_registered():

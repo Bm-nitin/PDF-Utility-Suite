@@ -65,7 +65,7 @@ from __future__ import annotations
 import queue
 import threading
 from pathlib import Path
-from typing import Dict, Iterable, List, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import tkinter as tk
 from tkinter import messagebox, ttk
@@ -73,6 +73,7 @@ from tkinter import messagebox, ttk
 import file_manager
 import models
 import pdf_engine
+import split_engine
 import tool_registry
 from config import APP_NAME, APP_VERSION
 
@@ -220,6 +221,23 @@ class MainWindow:
         self.current_tool_id: str = tool_registry.DEFAULT_TOOL_ID
         self.tool_nav_buttons: Dict[str, tk.Widget] = {}
 
+        # Phase 13: Split PDF's own state, deliberately separate from
+        # self.state (the Merge/Compress multi-file AppState) -- Split
+        # operates on exactly one source file at a time, which is a
+        # different shape of state, not a one-file-list special case of
+        # the multi-file list. Kept as a plain models.PDFFile (reusing
+        # that existing model) rather than a new one-off type.
+        self.split_source: Optional[models.PDFFile] = None
+        self.split_mode_var = tk.StringVar(value="individual")
+        self.split_n_var = tk.StringVar(value="1")
+        self.split_ranges_var = tk.StringVar(value="")
+        self.split_status_var = tk.StringVar(value="Status: Ready")
+
+        self._split_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._split_import_in_progress = False
+        self._split_queue: "queue.Queue[dict]" = queue.Queue()
+        self.split_in_progress = False
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -354,6 +372,7 @@ class MainWindow:
         self._build_status_area(outer)
 
         self._build_coming_soon_view(self.workspace_container)
+        self._build_split_workspace(self.workspace_container)
 
         self._select_tool(self.current_tool_id)
 
@@ -467,6 +486,183 @@ class MainWindow:
         self.coming_soon_title_label.configure(text=tool.name)
         self.coming_soon_desc_label.configure(text=tool.description)
 
+    def _build_split_workspace(self, parent: tk.Widget) -> None:
+        """Phase 13: the Split PDF tool's dedicated workspace. Kept
+        entirely separate from the Merge/Compress workspace's widgets
+        and state (self.split_source, not self.state) -- Split operates
+        on exactly one source file at a time, a genuinely different
+        shape of state, not a one-file special case of the multi-file
+        list. Visual style matches the existing cards/buttons so the
+        app still feels like one consistent application.
+        """
+        self.split_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.split_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="SPLIT PDF", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Split one PDF into multiple files -- locally, no upload.",
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Source file card
+        source_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        source_card.pack(fill="x", pady=(0, 16))
+        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner.pack(fill="x", padx=18, pady=16)
+
+        self.split_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_split_select_file_clicked,
+        )
+        self.split_select_btn.pack(side="left")
+
+        self.split_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.split_source_label.pack(side="left", padx=(16, 0))
+
+        # Split mode card
+        mode_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        mode_card.pack(fill="x", pady=(0, 16))
+        mode_inner = tk.Frame(mode_card, bg=COLOR_CARD)
+        mode_inner.pack(fill="x", padx=18, pady=14)
+
+        tk.Label(
+            mode_inner, text="Split Mode", font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        self.split_individual_radio = ttk.Radiobutton(
+            mode_inner, text="Individual pages (one PDF per page)",
+            value="individual", variable=self.split_mode_var,
+            style="Compression.TRadiobutton",
+            command=self._update_split_mode_controls,
+        )
+        self.split_individual_radio.pack(anchor="w", pady=2)
+
+        every_n_row = tk.Frame(mode_inner, bg=COLOR_CARD)
+        every_n_row.pack(fill="x", pady=2)
+        self.split_every_n_radio = ttk.Radiobutton(
+            every_n_row, text="Every", value="every_n",
+            variable=self.split_mode_var, style="Compression.TRadiobutton",
+            command=self._update_split_mode_controls,
+        )
+        self.split_every_n_radio.pack(side="left")
+        self.split_n_entry = ttk.Entry(
+            every_n_row, textvariable=self.split_n_var, width=5,
+        )
+        self.split_n_entry.pack(side="left", padx=(6, 6))
+        tk.Label(
+            every_n_row, text="pages", font=("Segoe UI", 10),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(side="left")
+
+        custom_row = tk.Frame(mode_inner, bg=COLOR_CARD)
+        custom_row.pack(fill="x", pady=(2, 0))
+        self.split_custom_radio = ttk.Radiobutton(
+            custom_row, text="Custom ranges:", value="custom",
+            variable=self.split_mode_var, style="Compression.TRadiobutton",
+            command=self._update_split_mode_controls,
+        )
+        self.split_custom_radio.pack(side="left")
+        self.split_ranges_entry = ttk.Entry(
+            custom_row, textvariable=self.split_ranges_var, width=24,
+        )
+        self.split_ranges_entry.pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            mode_inner,
+            text="Example: 1-3, 5, 7-9  (each range becomes its own file)",
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 0))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.split_button = ttk.Button(
+            action_wrapper, text="SPLIT PDF", style="Primary.TButton",
+            command=self._on_split_execute_clicked, state="disabled",
+        )
+        self.split_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.split_status_label = tk.Label(
+            status_frame, textvariable=self.split_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.split_status_label.pack(fill="x", pady=(0, 6))
+        self.split_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.split_progress_bar.pack(fill="x")
+
+        self._update_split_mode_controls()
+
+    def _update_split_mode_controls(self) -> None:
+        """Only the entry matching the currently-selected split mode is
+        interactive -- avoids the confusing appearance of an "Every N
+        pages" box that's editable while "Custom ranges" is selected.
+        """
+        mode = self.split_mode_var.get()
+        self.split_n_entry.configure(state="normal" if mode == "every_n" else "disabled")
+        self.split_ranges_entry.configure(state="normal" if mode == "custom" else "disabled")
+
+    def _update_split_button_state(self) -> None:
+        self.split_button.configure(
+            state="normal" if self.split_source is not None else "disabled"
+        )
+
+    def _update_split_controls_state(self) -> None:
+        """The single place that restores Split PDF's own controls to
+        their correct enabled state once no operation is running --
+        select-file button and mode radios are always re-enabled; the
+        N/ranges entries follow whichever mode is currently selected
+        (via _update_split_mode_controls()); the Split button depends
+        on whether a source file is currently selected (via
+        _update_split_button_state()). Mirrors the role
+        _update_button_states() already plays for Merge/Compress's own
+        select/add/clear buttons -- one consolidated place so a
+        completion handler can't forget to re-enable one of these
+        controls, which is exactly the bug this method fixes (Split's
+        select-file button and mode radios were previously never
+        explicitly re-enabled after an operation completed).
+        """
+        self.split_select_btn.configure(state="normal")
+        self.split_individual_radio.configure(state="normal")
+        self.split_every_n_radio.configure(state="normal")
+        self.split_custom_radio.configure(state="normal")
+        self._update_split_mode_controls()
+        self._update_split_button_state()
+
+    def _update_split_source_label(self) -> None:
+        if self.split_source is None:
+            self.split_source_label.configure(text="No file selected.")
+        else:
+            self.split_source_label.configure(
+                text=(
+                    f"{self.split_source.name}  \u2014  "
+                    f"{self.split_source.page_count_display}, "
+                    f"{self.split_source.size_display}"
+                )
+            )
+
     def _select_tool(self, tool_id: str) -> None:
         """Switches the workspace to show the given tool. Unknown tool
         ids are a safe no-op -- selecting a tool that doesn't exist
@@ -479,11 +675,19 @@ class MainWindow:
         self.current_tool_id = tool_id
 
         self.merge_compress_view.pack_forget()
+        self.split_view.pack_forget()
         self.coming_soon_view.pack_forget()
 
-        if tool.is_available:
+        if tool_id == "merge_compress":
             self.merge_compress_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "split":
+            self.split_view.pack(fill="both", expand=True, padx=28, pady=24)
         else:
+            # Covers every coming_soon tool, and defensively covers a
+            # future "available" tool that doesn't have its own
+            # dedicated view wired up yet -- falling back to the
+            # coming-soon placeholder is safer than showing a blank
+            # workspace.
             self._update_coming_soon_view(tool)
             self.coming_soon_view.pack(fill="both", expand=True, padx=28, pady=24)
 
@@ -772,33 +976,34 @@ class MainWindow:
     # ------------------------------------------------------------------
 
     def _any_operation_in_progress(self) -> bool:
-        """True if import, merge, compress, or merge+compress is
-        currently running on a background thread. Used as a defense-in-
-        depth guard in every click handler below -- the corresponding
-        buttons are already disabled while an operation runs (see
-        _set_controls_enabled), so this mainly protects against a stray
-        double-click/Enter-key re-trigger or a direct programmatic call
-        (as in tests) rather than something reachable through normal use.
+        """True if import, merge, compress, merge+compress, or a Split
+        PDF operation is currently running on a background thread. Used
+        as a defense-in-depth guard in every click handler below -- the
+        corresponding buttons are already disabled while an operation
+        runs (see _set_controls_enabled), so this mainly protects
+        against a stray double-click/Enter-key re-trigger or a direct
+        programmatic call (as in tests) rather than something reachable
+        through normal use.
 
         This is the single predicate every part of the UI (action
-        buttons, per-row file-list controls, Clear All) agrees on for
-        "is anything running right now" -- the Phase 9 "one consistent
-        operation-state mechanism" requirement. Four separate booleans
-        remain the underlying storage (rather than one combined
-        enum/state field) because each operation's start/completion
-        code already reads and writes its own flag in exactly one place,
-        and unifying them into a single field would mean rewriting every
-        worker's start/apply method for no behavioral difference --
-        which Phase 9 explicitly says to avoid ("preserve rather than
-        rewrite unnecessarily"). What actually matters for correctness --
-        that at most one operation can be running, checked consistently
-        everywhere -- is what this single method guarantees.
+        buttons, per-row file-list controls, Clear All, and -- Phase 13
+        -- Split PDF's own controls) agrees on for "is anything running
+        right now" -- the Phase 9 "one consistent operation-state
+        mechanism" requirement, now covering both tool workspaces.
+        Merge/Compress and Split PDF are treated as mutually exclusive
+        with each other too (not just within themselves): only one
+        background PDF operation runs at a time app-wide, which is the
+        simplest, safest policy and avoids two threads touching
+        PyMuPDF concurrently (see the Phase 5 delivery notes on
+        multi-threaded PyMuPDF fragility).
         """
         return (
             self._import_in_progress
             or self._merge_in_progress
             or self._compress_in_progress
             or self._mergecompress_in_progress
+            or self._split_import_in_progress
+            or self.split_in_progress
         )
 
     def _assert_main_thread(self) -> None:
@@ -1128,17 +1333,35 @@ class MainWindow:
         self.merge_only_btn.configure(state=state)
         self.compress_only_btn.configure(state=state)
         self.merge_compress_btn.configure(state=state)
+
+        # Phase 13: Split PDF's own controls are governed by the SAME
+        # single busy flag -- a Merge/Compress operation disables Split's
+        # controls too, and vice versa, per _any_operation_in_progress()'s
+        # app-wide mutual-exclusion policy.
+        self.split_select_btn.configure(state=state)
+        self.split_individual_radio.configure(state=state)
+        self.split_every_n_radio.configure(state=state)
+        self.split_custom_radio.configure(state=state)
+        self.split_n_entry.configure(state=state)
+        self.split_ranges_entry.configure(state=state)
+
         if enabled:
             # Restore the file-count-dependent rules for the three
             # action buttons (a flat "enabled" isn't correct for them).
             # _update_button_states() also re-renders the file list so
             # per-row controls pick up the new busy state -- see there.
             self._update_button_states()
+            # Re-disable whichever of split_n_entry/split_ranges_entry
+            # doesn't match the currently selected mode -- the blanket
+            # "normal" above would otherwise leave both entries active
+            # regardless of which split mode is actually selected.
+            self._update_split_controls_state()
         else:
             # Re-render immediately so per-row Remove/Move Up/Move Down
             # become disabled the instant an operation starts (they read
             # _any_operation_in_progress() at row-build time).
             self._render_file_list()
+            self.split_button.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # File list mutation (Phase 5: remove / reorder / clear)
@@ -1766,6 +1989,239 @@ class MainWindow:
                 title="Merge + Compress Failed",
                 message=item["error"],
                 parent=self.root,
+            )
+
+    # ------------------------------------------------------------------
+    # Split PDF: source file selection (Phase 13)
+    # ------------------------------------------------------------------
+    #
+    # Deliberately its own small import flow rather than reusing the
+    # Merge/Compress multi-file import machinery (prepare_import(),
+    # self.state) -- Split needs exactly one current source file, not a
+    # list, and coupling it to Merge-specific state would tie two
+    # genuinely different concerns together for no benefit. It reuses
+    # the same underlying pieces that matter (pdf_engine.get_pdf_info()
+    # for validation/metadata, the same background-thread+queue pattern,
+    # file_manager for the native dialog) without duplicating any of
+    # their logic.
+
+    def _on_split_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.split_status_var.set("Status: Ready")
+            return
+
+        self._start_split_import(path)
+
+    def _start_split_import(self, path: Path) -> None:
+        self._split_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.split_status_var.set("Status: Validating file...")
+        self.split_progress_bar.configure(mode="indeterminate")
+        self.split_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._split_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_split_import_queue)
+
+    def _split_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls pdf_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly.
+        """
+        try:
+            info = pdf_engine.get_pdf_info(path)
+            self._split_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._split_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._split_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_split_import_queue(self) -> None:
+        try:
+            result = self._split_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_split_import_queue)
+            return
+        self._apply_split_import_result(result)
+
+    def _apply_split_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.split_progress_bar.stop()
+        self.split_progress_bar.configure(mode="determinate", value=0)
+        self._split_import_in_progress = False
+
+        if result["success"]:
+            self.split_source = models.PDFFile(**result["info"])
+            self._update_split_source_label()
+            self.split_status_var.set(f"Status: Selected '{self.split_source.name}'.")
+        else:
+            self.split_source = None
+            self._update_split_source_label()
+            self.split_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        self._update_split_controls_state()
+
+    # ------------------------------------------------------------------
+    # Split PDF: the actual split operation (Phase 13)
+    # ------------------------------------------------------------------
+
+    def _parse_split_n(self) -> int:
+        text = self.split_n_var.get().strip()
+        try:
+            n = int(text)
+        except ValueError:
+            raise split_engine.PageRangeError(
+                f"'{text}' is not a valid number of pages. Enter a "
+                f"whole number of at least 1."
+            ) from None
+        if n < 1:
+            raise split_engine.PageRangeError(
+                "Enter a number of pages of at least 1."
+            )
+        return n
+
+    def _on_split_execute_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+        if self.split_source is None:
+            return  # defensive; button should be disabled without a source
+
+        mode = self.split_mode_var.get()
+        page_count = self.split_source.page_count or 0
+
+        try:
+            if mode == "individual":
+                groups = split_engine.compute_individual_page_groups(page_count)
+                include_range_label = False
+            elif mode == "every_n":
+                n = self._parse_split_n()
+                groups = split_engine.compute_every_n_page_groups(page_count, n)
+                include_range_label = False
+            else:  # "custom"
+                groups = split_engine.parse_page_ranges(
+                    self.split_ranges_var.get(), page_count
+                )
+                include_range_label = True
+        except split_engine.PageRangeError as exc:
+            self.split_status_var.set(f"Status: {exc}")
+            messagebox.showerror(
+                title="Invalid Split Settings", message=str(exc), parent=self.root,
+            )
+            return
+
+        output_dir = file_manager.select_output_folder(parent=self.root)
+        if output_dir is None:
+            self.split_status_var.set("Status: Ready")
+            return
+
+        self._start_split(self.split_source.path, groups, include_range_label, output_dir)
+
+    def _start_split(
+        self,
+        source_path: Path,
+        groups: List[List[int]],
+        include_range_label: bool,
+        output_dir: Path,
+    ) -> None:
+        self.split_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.split_status_var.set("Status: Preparing split...")
+        self.split_progress_bar.configure(mode="indeterminate")
+        self.split_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._split_worker,
+            args=(source_path, groups, include_range_label, output_dir),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_split_queue)
+
+    def _split_worker(
+        self,
+        source_path: Path,
+        groups: List[List[int]],
+        include_range_label: bool,
+        output_dir: Path,
+    ) -> None:
+        """Runs on a background thread. Calls split_engine.split_pdf()
+        directly. Must not touch any tkinter widget; only the
+        thread-safe queue is used to report back.
+        """
+        def report(message: str) -> None:
+            self._split_queue.put({"type": "progress", "message": message})
+
+        try:
+            result = split_engine.split_pdf(
+                source_path, groups, output_dir,
+                include_range_label=include_range_label,
+                progress_callback=report,
+            )
+            self._split_queue.put({
+                "type": "done", "success": True, "result": result, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._split_queue.put({
+                "type": "done", "success": False, "result": None, "error": str(exc),
+            })
+        except Exception:
+            self._split_queue.put({
+                "type": "done", "success": False, "result": None,
+                "error": "An unexpected error occurred while splitting.",
+            })
+
+    def _poll_split_queue(self) -> None:
+        try:
+            while True:
+                item = self._split_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.split_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_split_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_split_queue)
+
+    def _apply_split_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.split_progress_bar.stop()
+        self.split_progress_bar.configure(mode="determinate", value=0)
+
+        self.split_in_progress = False
+        self._update_button_states()
+        self._update_split_controls_state()
+
+        if item["success"]:
+            result = item["result"]
+            n = result["total_parts"]
+            self.split_status_var.set(
+                f"Status: Split completed successfully. Created {n} "
+                f"file{'s' if n != 1 else ''}."
+            )
+        else:
+            self.split_status_var.set("Status: Split failed.")
+            messagebox.showerror(
+                title="Split Failed", message=item["error"], parent=self.root,
             )
 
 

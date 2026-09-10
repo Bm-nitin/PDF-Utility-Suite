@@ -69,13 +69,16 @@ def test_nav_sidebar_lists_every_registered_tool(window):
 # ---------------------------------------------------------------------------
 
 def test_selecting_a_coming_soon_tool_shows_placeholder(window):
-    window._select_tool("split")
+    # Uses "remove_pages" rather than "split" -- Phase 13 makes Split a
+    # real available tool with its own dedicated workspace, so it's no
+    # longer a valid example of the generic coming-soon placeholder.
+    window._select_tool("remove_pages")
     window.root.update()
 
-    assert window.current_tool_id == "split"
+    assert window.current_tool_id == "remove_pages"
     assert not window.merge_compress_view.winfo_ismapped()
     assert window.coming_soon_view.winfo_ismapped()
-    assert window.coming_soon_title_label.cget("text") == "Split PDF"
+    assert window.coming_soon_title_label.cget("text") == "Remove Pages"
 
     window._select_tool("merge_compress")
     window.root.update()
@@ -137,13 +140,15 @@ def test_selecting_unknown_tool_id_is_a_safe_noop(window):
 
 
 def test_selecting_unknown_tool_id_while_on_a_coming_soon_tool_is_a_noop(window):
-    window._select_tool("split")
+    # "extract_pages" rather than "split" -- see the note in
+    # test_selecting_a_coming_soon_tool_shows_placeholder above.
+    window._select_tool("extract_pages")
     window.root.update()
 
     window._select_tool("totally_bogus_id")
     window.root.update()
 
-    assert window.current_tool_id == "split"
+    assert window.current_tool_id == "extract_pages"
     assert window.coming_soon_view.winfo_ismapped()
 
     window._select_tool("merge_compress")

@@ -77,6 +77,28 @@ def select_pdf_files(parent=None) -> List[Path]:
     return [Path(p) for p in paths]
 
 
+def select_single_pdf_file(parent=None) -> Optional[Path]:
+    """Open the native SINGLE-file Open dialog, restricted to PDFs.
+
+    Phase 13: Split PDF operates on exactly one source file at a time,
+    which is a different selection semantic than Merge/Compress's
+    multi-select (select_pdf_files() above) -- rather than reusing that
+    dialog and discarding extra selections (confusing: the user could
+    select three files and silently have two ignored), this is a
+    dedicated single-file picker using askopenfilename (singular).
+
+    Returns None if the user cancels -- a normal outcome, not an error.
+    """
+    path_str = filedialog.askopenfilename(
+        parent=parent,
+        title="Select PDF File",
+        filetypes=[("PDF files", "*.pdf")],
+    )
+    if not path_str:
+        return None
+    return Path(path_str)
+
+
 def save_pdf_file(
     parent=None,
     default_name: str = DEFAULT_OUTPUT_NAME,
@@ -221,6 +243,25 @@ def sanitize_windows_filename(name: str) -> str:
     return sanitized
 
 
+def _find_collision_free_path(output_dir: Path, base_name: str) -> Path:
+    """Shared collision-avoidance logic: try "<base_name>.pdf" first,
+    then "<base_name> (1).pdf", " (2)", etc., until a path that doesn't
+    currently exist is found. Used by both generate_compressed_output_path()
+    and generate_split_output_path() (Phase 13) so the naming/collision
+    rule lives in exactly one place.
+    """
+    candidate = output_dir / ensure_pdf_extension(base_name)
+    if not candidate.exists():
+        return candidate
+
+    counter = 1
+    while True:
+        candidate = output_dir / ensure_pdf_extension(f"{base_name} ({counter})")
+        if not candidate.exists():
+            return candidate
+        counter += 1
+
+
 def generate_compressed_output_path(input_path: Path, output_dir: Path) -> Path:
     """Generate a collision-safe destination path for a compressed copy
     of `input_path`, inside `output_dir`.
@@ -244,16 +285,26 @@ def generate_compressed_output_path(input_path: Path, output_dir: Path) -> Path:
     output_dir = Path(output_dir)
 
     stem = sanitize_windows_filename(input_path.stem)
-    base_name = f"{stem}_compressed"
+    return _find_collision_free_path(output_dir, f"{stem}_compressed")
 
-    candidate = output_dir / ensure_pdf_extension(base_name)
-    if not candidate.exists():
-        return candidate
 
-    counter = 1
-    while True:
-        candidate = output_dir / ensure_pdf_extension(f"{base_name} ({counter})")
-        if not candidate.exists():
-            return candidate
-        counter += 1
+def generate_split_output_path(source_path: Path, output_dir: Path, suffix: str) -> Path:
+    """Generate a collision-safe destination path for one Split PDF
+    output file (Phase 13), following the exact same naming/collision
+    pattern as generate_compressed_output_path() above: "<stem><suffix>.pdf",
+    auto-incrementing with " (1)", " (2)", etc. if that name is already
+    taken. Never returns a path that already exists.
+
+    `suffix` is produced by split_engine.py (e.g. "_001" for individual-
+    page/every-N-pages mode, or "_001_pages_1-3" for custom-range mode)
+    -- this function only owns filename sanitization and collision
+    avoidance, not the sequence-numbering/range-labeling scheme itself,
+    keeping "what pages went where" (split_engine.py) separate from
+    "how to turn that into a safe Windows filename" (this module).
+    """
+    source_path = Path(source_path)
+    output_dir = Path(output_dir)
+
+    stem = sanitize_windows_filename(source_path.stem)
+    return _find_collision_free_path(output_dir, f"{stem}{suffix}")
 
