@@ -85,16 +85,16 @@ SPLIT = Tool(
 REMOVE_PAGES = Tool(
     id="remove_pages",
     name="Remove Pages",
-    description="Delete specific pages from a PDF.",
-    status=STATUS_COMING_SOON,
-    category="organize",
+    description="Remove selected pages from a PDF",
+    status=STATUS_AVAILABLE,
+    category="PDF",
 )
 
 EXTRACT_PAGES = Tool(
     id="extract_pages",
     name="Extract Pages",
     description="Save specific pages of a PDF as a new file.",
-    status=STATUS_COMING_SOON,
+    status=STATUS_AVAILABLE,
     category="organize",
 )
 

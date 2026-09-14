@@ -103,6 +103,7 @@ def save_pdf_file(
     parent=None,
     default_name: str = DEFAULT_OUTPUT_NAME,
     initial_dir: Optional[str] = None,
+    title: str = "Save Merged PDF As",
 ) -> Optional[Path]:
     """Open the native Save As dialog.
 
@@ -115,10 +116,16 @@ def save_pdf_file(
     explicitly type a different extension, Windows' native dialog leaves
     it as-is, so this is re-checked defensively here rather than trusted
     to the dialog alone.
+
+    `title` defaults to the original Merge-only wording so every
+    existing caller is unaffected; Phase 14 (Remove Pages) is the first
+    caller to pass a different, more accurate title for its own Save As
+    dialog rather than this function growing a second, parallel
+    save-dialog mechanism.
     """
     kwargs = dict(
         parent=parent,
-        title="Save Merged PDF As",
+        title=title,
         defaultextension=".pdf",
         initialfile=default_name,
         filetypes=[("PDF files", "*.pdf")],

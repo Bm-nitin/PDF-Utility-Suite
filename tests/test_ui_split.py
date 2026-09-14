@@ -424,8 +424,21 @@ def test_controls_disabled_while_split_runs_and_restored_after(window, split_sou
             gate.release()
             assert _pump_until(window, lambda: not window.split_in_progress)
 
+    # Select PDF is immediately usable again after the split completes.
     assert str(window.split_select_btn["state"]) == "normal"
-    assert str(window.split_button["state"]) == "normal"  # source still selected
+    # Bug fix: a successful split clears its source, so the Split
+    # button (which depends on split_source) correctly goes back to
+    # "disabled" rather than staying "normal" with a stale source.
+    assert window.split_source is None
+    assert str(window.split_button["state"]) == "disabled"
+
+    # Selecting a fresh source re-enables the Split button, proving no
+    # stale state is blocking the next operation.
+    second_pdf = tmp_path / "second.pdf"
+    _make_pdf(second_pdf, pages=2)
+    _select_split_file(window, second_pdf)
+    assert window.split_source is not None
+    assert str(window.split_button["state"]) == "normal"
 
     window._select_tool("merge_compress")
     window.root.update()
@@ -534,8 +547,194 @@ def test_successful_split_restores_controls_based_on_state(window, split_source_
         assert _pump_until(window, lambda: not window.split_in_progress)
 
     assert str(window.split_select_btn["state"]) == "normal"
-    assert str(window.split_button["state"]) == "normal"  # source still set
+    # Bug fix: a successful split clears its source, so the Split
+    # button (which depends on split_source) correctly goes back to
+    # "disabled" rather than staying "normal" with a stale source.
+    assert str(window.split_button["state"]) == "disabled"
+    assert window.split_source is None
 
+    window._select_tool("merge_compress")
+    window.root.update()
+
+
+# ---------------------------------------------------------------------------
+# Bug fix regression tests: successful Split resets its source, Merge/
+# Compress and Split state stay isolated from each other.
+# ---------------------------------------------------------------------------
+
+def test_successful_split_clears_source_and_label(window, split_source_pdf, tmp_path):
+    """Bug 2: after a successful split, the source PDF and its label
+    must be cleared, not left stale.
+    """
+    window._select_tool("split")
+    window.root.update()
+    _reset_split_state(window)
+    _select_split_file(window, split_source_pdf)
+    assert window.split_source is not None
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    with patch("file_manager.select_output_folder", return_value=output_dir):
+        window._on_split_execute_clicked()
+        assert _pump_until(window, lambda: not window.split_in_progress)
+
+    assert window.split_source is None
+    assert window.split_source_label.cget("text") == "No file selected."
+
+    window._select_tool("merge_compress")
+    window.root.update()
+
+
+def test_another_pdf_can_be_selected_immediately_after_a_successful_split(
+    window, split_source_pdf, tmp_path
+):
+    """Bug 2, requirement 2: no stale PDF remains attached to the next
+    Split operation -- a new file can be selected and split right away.
+    """
+    window._select_tool("split")
+    window.root.update()
+    _reset_split_state(window)
+    _select_split_file(window, split_source_pdf)
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+
+    with patch("file_manager.select_output_folder", return_value=output_dir):
+        window._on_split_execute_clicked()
+        assert _pump_until(window, lambda: not window.split_in_progress)
+
+    assert window.split_source is None
+    assert str(window.split_select_btn["state"]) == "normal"
+
+    second_pdf = tmp_path / "second.pdf"
+    _make_pdf(second_pdf, pages=4)
+    _select_split_file(window, second_pdf)
+
+    assert window.split_source is not None
+    assert window.split_source.name == "second.pdf"
+    assert str(window.split_button["state"]) == "normal"
+
+    output_dir_2 = tmp_path / "out2"
+    output_dir_2.mkdir()
+    with patch("file_manager.select_output_folder", return_value=output_dir_2):
+        window._on_split_execute_clicked()
+        assert _pump_until(window, lambda: not window.split_in_progress)
+
+    outputs = sorted(output_dir_2.glob("*.pdf"))
+    assert len(outputs) == 4
+    assert window.split_source is None
+
+    window._select_tool("merge_compress")
+    window.root.update()
+
+
+def test_merge_compress_select_files_then_clear_all_leaves_split_usable(
+    window, split_source_pdf, tmp_path
+):
+    """Bugs 3 & state isolation: Merge/Compress -> select PDFs -> Clear
+    All must not leave Split PDF's own controls permanently disabled.
+    """
+    window._select_tool("merge_compress")
+    window.root.update()
+    window.state.files.clear()
+    window._render_file_list()
+    window._update_summary()
+    window._update_button_states()
+
+    a = tmp_path / "a.pdf"
+    b = tmp_path / "b.pdf"
+    _make_pdf(a, pages=2)
+    _make_pdf(b, pages=3)
+
+    with patch("file_manager.select_pdf_files", return_value=[a, b]):
+        window._on_select_files_clicked()
+        assert _pump_until(window, lambda: not window._import_in_progress)
+
+    assert window.state.total_files == 2
+
+    window._on_clear_all_clicked()
+    window.root.update()
+    assert window.state.total_files == 0
+
+    window._select_tool("split")
+    window.root.update()
+
+    # Split's own controls must be usable -- not stuck disabled from
+    # the Merge/Compress import's busy lock.
+    assert str(window.split_select_btn["state"]) == "normal"
+    assert str(window.split_individual_radio["state"]) == "normal"
+
+    _select_split_file(window, split_source_pdf)
+    assert window.split_source is not None
+    assert str(window.split_button["state"]) == "normal"
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    with patch("file_manager.select_output_folder", return_value=output_dir):
+        window._on_split_execute_clicked()
+        assert _pump_until(window, lambda: not window.split_in_progress)
+
+    outputs = sorted(output_dir.glob("*.pdf"))
+    assert len(outputs) == 10
+    assert "Split completed successfully" in window.split_status_var.get()
+
+    _reset_split_state(window)
+    window._select_tool("merge_compress")
+    window.root.update()
+
+
+def test_split_then_merge_compress_then_split_does_not_corrupt_state(
+    window, split_source_pdf, tmp_path
+):
+    """Split -> Merge/Compress -> Split: each tool's state must stay
+    isolated from the other across repeated back-and-forth use.
+    """
+    window._select_tool("split")
+    window.root.update()
+    _reset_split_state(window)
+    _select_split_file(window, split_source_pdf)
+    assert window.split_source is not None
+
+    window._select_tool("merge_compress")
+    window.root.update()
+    window.state.files.clear()
+    window._render_file_list()
+    window._update_summary()
+    window._update_button_states()
+
+    a = tmp_path / "a.pdf"
+    b = tmp_path / "b.pdf"
+    _make_pdf(a, pages=2)
+    _make_pdf(b, pages=3)
+    with patch("file_manager.select_pdf_files", return_value=[a, b]):
+        window._on_select_files_clicked()
+        assert _pump_until(window, lambda: not window._import_in_progress)
+    assert window.state.total_files == 2
+
+    output = tmp_path / "merged.pdf"
+    with patch("file_manager.save_pdf_file", return_value=output):
+        window._on_merge_only_clicked()
+        assert _pump_until(window, lambda: not window._merge_in_progress)
+    assert output.exists()
+
+    # Merge/Compress work must not have disturbed Split's still-selected
+    # source.
+    window._select_tool("split")
+    window.root.update()
+    assert window.split_source is not None
+    assert str(window.split_select_btn["state"]) == "normal"
+    assert str(window.split_button["state"]) == "normal"
+
+    output_dir = tmp_path / "out"
+    output_dir.mkdir()
+    with patch("file_manager.select_output_folder", return_value=output_dir):
+        window._on_split_execute_clicked()
+        assert _pump_until(window, lambda: not window.split_in_progress)
+
+    assert window.split_source is None
+
+    window._on_clear_all_clicked()
     window._select_tool("merge_compress")
     window.root.update()
 

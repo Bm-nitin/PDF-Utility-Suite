@@ -55,17 +55,21 @@ def test_tool_is_immutable():
 # Registry contents
 # ---------------------------------------------------------------------------
 
-def test_merge_compress_and_split_are_the_available_tools():
-    """Phase 13 makes Split PDF the second real, working tool. Every
-    other future tool remains coming_soon until its own phase.
+def test_merge_compress_split_remove_pages_and_extract_pages_are_the_available_tools():
+    """Phase 13 made Split PDF the second real, working tool; Phase 14
+    made Remove Pages the third; Phase 15 makes Extract Pages the
+    fourth. Every other future tool remains coming_soon until its own
+    phase.
     """
     available_ids = {t.id for t in tool_registry.get_all_tools() if t.is_available}
-    assert available_ids == {"merge_compress", "split"}
+    assert available_ids == {
+        "merge_compress", "split", "remove_pages", "extract_pages",
+    }
 
 
-def test_nine_future_tools_are_registered_as_coming_soon():
+def test_seven_future_tools_are_registered_as_coming_soon():
     expected_ids = {
-        "remove_pages", "extract_pages", "organize_pages",
+        "organize_pages",
         "rotate", "protect", "unlock", "page_numbers", "watermark",
         "images_to_pdf",
     }
@@ -136,7 +140,13 @@ def test_get_all_tools_returns_a_copy_not_the_internal_list():
 def test_get_tools_by_category():
     organize_tools = tool_registry.get_tools_by_category("organize")
     ids = {t.id for t in organize_tools}
-    assert ids == {"split", "remove_pages", "extract_pages", "organize_pages", "rotate"}
+    assert ids == {"split", "extract_pages", "organize_pages", "rotate"}
+
+
+def test_get_tools_by_category_pdf_contains_remove_pages():
+    pdf_tools = tool_registry.get_tools_by_category("PDF")
+    ids = {t.id for t in pdf_tools}
+    assert ids == {"remove_pages"}
 
 
 def test_get_tools_by_category_unknown_category_returns_empty():
@@ -155,3 +165,29 @@ def test_images_to_pdf_tool_specifically_registered():
     tool = tool_registry.get_tool("images_to_pdf")
     assert tool is not None
     assert not tool.is_available
+
+
+def test_remove_pages_tool_specifically_registered():
+    tool = tool_registry.get_tool("remove_pages")
+    assert tool is not None
+    assert tool.name == "Remove Pages"
+    assert tool.description == "Remove selected pages from a PDF"
+    assert tool.status == STATUS_AVAILABLE
+    assert tool.is_available
+    assert tool.category == "PDF"
+
+
+def test_extract_pages_tool_specifically_registered():
+    tool = tool_registry.get_tool("extract_pages")
+    assert tool is not None
+    assert tool.name == "Extract Pages"
+    assert tool.description == "Save specific pages of a PDF as a new file."
+    assert tool.status == STATUS_AVAILABLE
+    assert tool.is_available
+    # Category is deliberately left as its pre-existing "organize"
+    # value (it was never "PDF") -- Phase 15 only flips its status from
+    # coming_soon to available; it does not change the tool's id or
+    # category, per the "keep its existing tool id" / "do not redesign
+    # existing architecture" requirements. test_get_tools_by_category
+    # below (unchanged from before Phase 15) already locks this in.
+    assert tool.category == "organize"

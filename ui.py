@@ -70,9 +70,11 @@ from typing import Dict, Iterable, List, Optional, Set, Tuple
 import tkinter as tk
 from tkinter import messagebox, ttk
 
+import extract_engine
 import file_manager
 import models
 import pdf_engine
+import remove_pages_engine
 import split_engine
 import tool_registry
 from config import APP_NAME, APP_VERSION
@@ -238,6 +240,39 @@ class MainWindow:
         self._split_queue: "queue.Queue[dict]" = queue.Queue()
         self.split_in_progress = False
 
+        # Phase 14: Remove Pages' own state, deliberately separate from
+        # self.state and from Split's self.split_source -- like Split,
+        # it operates on exactly one source file at a time, but its
+        # second piece of state (a page/range selection string to
+        # validate live as the user types, rather than a split mode) is
+        # its own genuinely different shape, not a variant of either
+        # existing tool's state.
+        self.remove_pages_source: Optional[models.PDFFile] = None
+        self.remove_pages_selection_var = tk.StringVar(value="")
+        self.remove_pages_status_var = tk.StringVar(value="Status: Ready")
+
+        self._remove_pages_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._remove_pages_import_in_progress = False
+        self._remove_pages_queue: "queue.Queue[dict]" = queue.Queue()
+        self.remove_pages_in_progress = False
+
+        # Phase 15: Extract Pages' own state, deliberately separate from
+        # self.state, self.split_source, and self.remove_pages_source --
+        # like Split and Remove Pages, it operates on exactly one source
+        # file at a time. Its shape (a source file + a live-validated
+        # page/range selection string) is closest to Remove Pages', but
+        # it is NOT the same tool with the selection inverted -- see
+        # extract_engine.py's module docstring for the order/duplicate-
+        # preserving semantic that makes it genuinely different.
+        self.extract_source: Optional[models.PDFFile] = None
+        self.extract_selection_var = tk.StringVar(value="")
+        self.extract_status_var = tk.StringVar(value="Status: Ready")
+
+        self._extract_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._extract_import_in_progress = False
+        self._extract_queue: "queue.Queue[dict]" = queue.Queue()
+        self.extract_in_progress = False
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -351,13 +386,28 @@ class MainWindow:
         # built exactly as it always has been (same methods, same
         # widgets, same attribute names) -- it's just now placed inside
         # self.merge_compress_view instead of directly under the root.
+        #
+        # Bug fix (post-Phase 13): with enough imported files, the
+        # Merge/Compress workspace's content (file list + summary +
+        # compression card + action buttons + status) can grow taller
+        # than the visible window, pushing MERGE ONLY / COMPRESS ONLY /
+        # MERGE + COMPRESS below the bottom edge with no way to reach
+        # them. The fix is the standard Tkinter "scrollable frame"
+        # pattern: workspace_container (an existing attribute name, kept
+        # exactly as other code already expects it) is now the inner
+        # frame embedded in a Canvas via create_window(), with a
+        # vertical Scrollbar alongside it. Nothing about what gets
+        # packed INTO workspace_container changes -- merge_compress_view,
+        # split_view, and coming_soon_view are still built and
+        # shown/hidden exactly as before; only their ultimate container
+        # gained scrolling. The sidebar built by _build_tool_navigation()
+        # is a sibling of the scrollable area, not inside it, so it
+        # never scrolls away.
         shell = tk.Frame(self.root, bg=COLOR_BG)
         shell.pack(fill="both", expand=True)
 
         self._build_tool_navigation(shell)
-
-        self.workspace_container = tk.Frame(shell, bg=COLOR_BG)
-        self.workspace_container.pack(side="left", fill="both", expand=True)
+        self._build_scrollable_workspace(shell)
 
         self.merge_compress_view = tk.Frame(self.workspace_container, bg=COLOR_BG)
 
@@ -373,8 +423,117 @@ class MainWindow:
 
         self._build_coming_soon_view(self.workspace_container)
         self._build_split_workspace(self.workspace_container)
+        self._build_remove_pages_workspace(self.workspace_container)
+        self._build_extract_workspace(self.workspace_container)
 
         self._select_tool(self.current_tool_id)
+
+    def _build_scrollable_workspace(self, parent: tk.Widget) -> None:
+        """Builds the Canvas + vertical Scrollbar + inner-frame structure
+        that makes the workspace area vertically scrollable.
+
+        self.workspace_container (the inner frame) is what every tool
+        view is built into and packed/unpacked from -- exactly as
+        before this fix. Only its parent changed, from being packed
+        directly into `shell` to being embedded in a Canvas.
+        """
+        workspace_outer = tk.Frame(parent, bg=COLOR_BG)
+        workspace_outer.pack(side="left", fill="both", expand=True)
+
+        self.workspace_canvas = tk.Canvas(
+            workspace_outer, bg=COLOR_BG, highlightthickness=0, bd=0,
+        )
+        self.workspace_scrollbar = ttk.Scrollbar(
+            workspace_outer, orient="vertical",
+            command=self.workspace_canvas.yview,
+        )
+        self.workspace_canvas.configure(yscrollcommand=self.workspace_scrollbar.set)
+        self.workspace_canvas.pack(side="left", fill="both", expand=True)
+        # The scrollbar is shown/hidden on demand by
+        # _update_workspace_scrollbar_visibility() -- not packed here
+        # unconditionally, so it doesn't appear when content already
+        # fits (e.g. the empty-state screen, or just a couple of files).
+
+        self.workspace_container = tk.Frame(self.workspace_canvas, bg=COLOR_BG)
+        self._workspace_window_id = self.workspace_canvas.create_window(
+            (0, 0), window=self.workspace_container, anchor="nw",
+        )
+
+        # Standard scrollregion-tracking pattern: whenever the inner
+        # frame's actual required size changes (e.g. a file row was
+        # added/removed, changing merge_compress_view's height), update
+        # the canvas's scrollregion so scrolling range always matches
+        # the real content -- no explicit "recalculate scrolling" calls
+        # needed anywhere in the existing file-list/import/operation
+        # code, since this fires automatically via Tkinter's own
+        # geometry propagation.
+        self.workspace_container.bind("<Configure>", self._on_workspace_content_configure)
+        # Keep the embedded frame's width matched to the canvas's own
+        # visible width, so content expands horizontally to fill the
+        # available workspace width (only vertical scrolling is added).
+        self.workspace_canvas.bind("<Configure>", self._on_workspace_canvas_configure)
+
+        # Mouse wheel: bound only while the pointer is actually over the
+        # workspace canvas (attached on <Enter>, detached on <Leave>),
+        # never a permanently-global handler -- this is the standard
+        # idiom for reliable cross-widget wheel scrolling in Tkinter
+        # (a plain per-widget <MouseWheel> bind is not reliably
+        # delivered when a child widget is under the pointer), and
+        # because it's only active during hover, it cannot interfere
+        # with scrolling in any other widget.
+        self.workspace_canvas.bind("<Enter>", self._bind_workspace_mousewheel)
+        self.workspace_canvas.bind("<Leave>", self._unbind_workspace_mousewheel)
+        # Ensure the (hover-scoped) global wheel binding can never
+        # outlive the canvas it was created for.
+        self.workspace_canvas.bind("<Destroy>", self._unbind_workspace_mousewheel)
+
+    def _on_workspace_content_configure(self, _event=None) -> None:
+        self.workspace_canvas.configure(scrollregion=self.workspace_canvas.bbox("all"))
+        self._update_workspace_scrollbar_visibility()
+
+    def _on_workspace_canvas_configure(self, event) -> None:
+        self.workspace_canvas.itemconfigure(self._workspace_window_id, width=event.width)
+        self._update_workspace_scrollbar_visibility()
+
+    def _update_workspace_scrollbar_visibility(self) -> None:
+        """Shows the scrollbar only when the current content is
+        genuinely taller than the visible workspace area, and hides it
+        otherwise (e.g. the empty-state screen, or a short file list) --
+        per the "hide/disable it when content fits" guidance. Purely
+        cosmetic: scrolling itself (mouse wheel, dragging an already-
+        visible scrollbar) works the same regardless of this.
+        """
+        bbox = self.workspace_canvas.bbox("all")
+        if not bbox:
+            return
+        content_height = bbox[3] - bbox[1]
+        canvas_height = self.workspace_canvas.winfo_height()
+        needs_scrollbar = content_height > canvas_height
+        # Deliberately NOT winfo_ismapped(): that reflects the native
+        # window system's own map/unmap state, which on Windows is not
+        # guaranteed to be in sync with Tk's internal pack bookkeeping
+        # at the moment this runs. winfo_manager() reports Tk's own
+        # geometry-manager registration for the widget -- exactly what
+        # pack()/pack_forget() toggle below -- so it's the reliable,
+        # synchronous source of truth for "is this widget currently
+        # packed", regardless of platform.
+        is_shown = self.workspace_scrollbar.winfo_manager() == "pack"
+        if needs_scrollbar and not is_shown:
+            self.workspace_scrollbar.pack(side="right", fill="y")
+        elif not needs_scrollbar and is_shown:
+            self.workspace_scrollbar.pack_forget()
+
+    def _bind_workspace_mousewheel(self, _event=None) -> None:
+        self.workspace_canvas.bind_all("<MouseWheel>", self._on_workspace_mousewheel)
+
+    def _unbind_workspace_mousewheel(self, _event=None) -> None:
+        self.workspace_canvas.unbind_all("<MouseWheel>")
+
+    def _on_workspace_mousewheel(self, event) -> None:
+        # Windows delivers <MouseWheel> with event.delta in multiples of
+        # 120 (positive = wheel up, negative = wheel down); translate
+        # that into a small number of scroll "units" for the canvas.
+        self.workspace_canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
 
     def _build_tool_navigation(self, parent: tk.Widget) -> None:
         """A simple, always-visible sidebar listing every registered
@@ -663,6 +822,407 @@ class MainWindow:
                 )
             )
 
+    def _build_remove_pages_workspace(self, parent: tk.Widget) -> None:
+        """Phase 14: the Remove Pages tool's dedicated workspace.
+
+        Follows the exact same shape as _build_split_workspace() above
+        (its own state, its own view frame, same cards/buttons/status
+        styling) -- reusing the established visual language rather than
+        inventing a new one, per the Phase 14 requirement. Like Split,
+        this operates on exactly one source file at a time
+        (self.remove_pages_source), kept separate from self.state.
+        """
+        self.remove_pages_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.remove_pages_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="REMOVE PAGES", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Remove selected pages from a PDF -- locally, no upload.",
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Source file card
+        source_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        source_card.pack(fill="x", pady=(0, 16))
+        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner.pack(fill="x", padx=18, pady=16)
+
+        self.remove_pages_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_remove_pages_select_file_clicked,
+        )
+        self.remove_pages_select_btn.pack(side="left")
+
+        self.remove_pages_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.remove_pages_source_label.pack(side="left", padx=(16, 0))
+
+        # Page-selection card
+        selection_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        selection_card.pack(fill="x", pady=(0, 16))
+        selection_inner = tk.Frame(selection_card, bg=COLOR_CARD)
+        selection_inner.pack(fill="x", padx=18, pady=14)
+
+        tk.Label(
+            selection_inner, text="Pages to Remove",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        entry_row = tk.Frame(selection_inner, bg=COLOR_CARD)
+        entry_row.pack(fill="x")
+        self.remove_pages_selection_entry = ttk.Entry(
+            entry_row, textvariable=self.remove_pages_selection_var, width=30,
+        )
+        self.remove_pages_selection_entry.pack(side="left")
+        self.remove_pages_clear_btn = ttk.Button(
+            entry_row, text="Clear Selection", style="Secondary.TButton",
+            command=self._on_remove_pages_clear_selection_clicked,
+        )
+        self.remove_pages_clear_btn.pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            selection_inner,
+            text="Example: 1,3,5-7  (1-based page numbers, inclusive ranges)",
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 10))
+
+        # Live preview/summary -- Phase 14 requirement 7: no engine run
+        # needed just to validate basic selection syntax, so this is
+        # driven entirely by remove_pages_engine.resolve_pages_to_remove()
+        # (pure parsing, no PDF write) via the StringVar trace below.
+        self.remove_pages_feedback_var = tk.StringVar(value="")
+        self.remove_pages_feedback_label = tk.Label(
+            selection_inner, textvariable=self.remove_pages_feedback_var,
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            justify="left", anchor="w",
+        )
+        self.remove_pages_feedback_label.pack(fill="x")
+
+        self.remove_pages_error_var = tk.StringVar(value="")
+        self.remove_pages_error_label = tk.Label(
+            selection_inner, textvariable=self.remove_pages_error_var,
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            justify="left", anchor="w", wraplength=520,
+        )
+        self.remove_pages_error_label.pack(fill="x", pady=(4, 0))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.remove_pages_button = ttk.Button(
+            action_wrapper, text="REMOVE PAGES", style="Primary.TButton",
+            command=self._on_remove_pages_execute_clicked, state="disabled",
+        )
+        self.remove_pages_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.remove_pages_status_label = tk.Label(
+            status_frame, textvariable=self.remove_pages_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.remove_pages_status_label.pack(fill="x", pady=(0, 6))
+        self.remove_pages_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.remove_pages_progress_bar.pack(fill="x")
+
+        # Live validation feedback as the user types -- never requires
+        # the engine (the actual PDF write) to run just to show
+        # "Pages to remove: ... / Pages selected: N / Pages remaining: X"
+        # or a validation error for bad syntax.
+        self.remove_pages_selection_var.trace_add(
+            "write", self._on_remove_pages_selection_changed
+        )
+        self._update_remove_pages_feedback()
+
+    def _on_remove_pages_selection_changed(self, *_args) -> None:
+        self._update_remove_pages_feedback()
+
+    def _update_remove_pages_feedback(self) -> None:
+        """The single place that keeps the Pages-to-remove preview, the
+        validation error message, and the REMOVE PAGES button's enabled
+        state all in sync with the current selection text -- driven
+        purely by remove_pages_engine.resolve_pages_to_remove() (no PDF
+        write), so bad input is caught instantly and can never crash the
+        UI (every PageRangeError is caught right here).
+        """
+        text = self.remove_pages_selection_var.get()
+        self.remove_pages_error_var.set("")
+
+        if self.remove_pages_source is None:
+            self.remove_pages_feedback_var.set("Select a PDF file first.")
+            self.remove_pages_button.configure(state="disabled")
+            return
+
+        page_count = self.remove_pages_source.page_count or 0
+
+        if not text.strip():
+            self.remove_pages_feedback_var.set(
+                f"Pages remaining: {page_count} of {page_count}"
+            )
+            self.remove_pages_button.configure(state="disabled")
+            return
+
+        try:
+            indices = remove_pages_engine.resolve_pages_to_remove(text, page_count)
+        except split_engine.PageRangeError as exc:
+            self.remove_pages_error_var.set(str(exc))
+            self.remove_pages_feedback_var.set(f"Pages to remove: {text.strip()}")
+            self.remove_pages_button.configure(state="disabled")
+            return
+
+        remaining = page_count - len(indices)
+        self.remove_pages_feedback_var.set(
+            f"Pages to remove: {text.strip()}\n"
+            f"Pages selected: {len(indices)}\n"
+            f"Pages remaining: {remaining}"
+        )
+        self.remove_pages_button.configure(
+            state="disabled" if self._any_operation_in_progress() else "normal"
+        )
+
+    def _update_remove_pages_controls_state(self) -> None:
+        """The single place that restores Remove Pages' own controls to
+        their correct enabled state once no operation is running --
+        mirrors _update_split_controls_state()'s role for Split PDF.
+        """
+        self.remove_pages_select_btn.configure(state="normal")
+        self.remove_pages_clear_btn.configure(state="normal")
+        self.remove_pages_selection_entry.configure(state="normal")
+        self._update_remove_pages_feedback()
+
+    def _update_remove_pages_source_label(self) -> None:
+        if self.remove_pages_source is None:
+            self.remove_pages_source_label.configure(text="No file selected.")
+        else:
+            self.remove_pages_source_label.configure(
+                text=(
+                    f"{self.remove_pages_source.name}  \u2014  "
+                    f"{self.remove_pages_source.page_count_display}, "
+                    f"{self.remove_pages_source.size_display}"
+                )
+            )
+
+    def _build_extract_workspace(self, parent: tk.Widget) -> None:
+        """Phase 15: the Extract Pages tool's dedicated workspace.
+
+        Follows the exact same shape as _build_remove_pages_workspace()
+        above (its own state, its own view frame, same cards/buttons/
+        status styling) -- reusing the established visual language
+        rather than inventing a new one. Like Split and Remove Pages,
+        this operates on exactly one source file at a time
+        (self.extract_source), kept separate from self.state.
+        """
+        self.extract_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.extract_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="EXTRACT PAGES", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Save specific pages of a PDF as a new file -- locally, no upload.",
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Source file card
+        source_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        source_card.pack(fill="x", pady=(0, 16))
+        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner.pack(fill="x", padx=18, pady=16)
+
+        self.extract_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_extract_select_file_clicked,
+        )
+        self.extract_select_btn.pack(side="left")
+
+        self.extract_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.extract_source_label.pack(side="left", padx=(16, 0))
+
+        # Page-selection card
+        selection_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        selection_card.pack(fill="x", pady=(0, 16))
+        selection_inner = tk.Frame(selection_card, bg=COLOR_CARD)
+        selection_inner.pack(fill="x", padx=18, pady=14)
+
+        tk.Label(
+            selection_inner, text="Pages to Extract",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        entry_row = tk.Frame(selection_inner, bg=COLOR_CARD)
+        entry_row.pack(fill="x")
+        self.extract_selection_entry = ttk.Entry(
+            entry_row, textvariable=self.extract_selection_var, width=30,
+        )
+        self.extract_selection_entry.pack(side="left")
+        self.extract_clear_btn = ttk.Button(
+            entry_row, text="Clear Selection", style="Secondary.TButton",
+            command=self._on_extract_clear_selection_clicked,
+        )
+        self.extract_clear_btn.pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            selection_inner,
+            text=(
+                "Example: 2,4  or  1-3,5,7-9  (1-based page numbers; "
+                "pages are extracted in the order you list them)"
+            ),
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 10))
+
+        # Live preview/summary -- no engine run needed just to validate
+        # basic selection syntax, so this is driven entirely by
+        # extract_engine.resolve_pages_to_extract() (pure parsing, no
+        # PDF write) via the StringVar trace below.
+        self.extract_feedback_var = tk.StringVar(value="")
+        self.extract_feedback_label = tk.Label(
+            selection_inner, textvariable=self.extract_feedback_var,
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            justify="left", anchor="w",
+        )
+        self.extract_feedback_label.pack(fill="x")
+
+        self.extract_error_var = tk.StringVar(value="")
+        self.extract_error_label = tk.Label(
+            selection_inner, textvariable=self.extract_error_var,
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            justify="left", anchor="w", wraplength=520,
+        )
+        self.extract_error_label.pack(fill="x", pady=(4, 0))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.extract_button = ttk.Button(
+            action_wrapper, text="EXTRACT PAGES", style="Primary.TButton",
+            command=self._on_extract_execute_clicked, state="disabled",
+        )
+        self.extract_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.extract_status_label = tk.Label(
+            status_frame, textvariable=self.extract_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.extract_status_label.pack(fill="x", pady=(0, 6))
+        self.extract_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.extract_progress_bar.pack(fill="x")
+
+        # Live validation feedback as the user types -- never requires
+        # the engine (the actual PDF write) to run just to show
+        # "Pages to extract: ... / Pages selected: N" or a validation
+        # error for bad syntax.
+        self.extract_selection_var.trace_add(
+            "write", self._on_extract_selection_changed
+        )
+        self._update_extract_feedback()
+
+    def _on_extract_selection_changed(self, *_args) -> None:
+        self._update_extract_feedback()
+
+    def _update_extract_feedback(self) -> None:
+        """The single place that keeps the Pages-to-extract preview, the
+        validation error message, and the EXTRACT PAGES button's enabled
+        state all in sync with the current selection text -- driven
+        purely by extract_engine.resolve_pages_to_extract() (no PDF
+        write), so bad input is caught instantly and can never crash the
+        UI (every PageRangeError is caught right here).
+        """
+        text = self.extract_selection_var.get()
+        self.extract_error_var.set("")
+
+        if self.extract_source is None:
+            self.extract_feedback_var.set("Select a PDF file first.")
+            self.extract_button.configure(state="disabled")
+            return
+
+        page_count = self.extract_source.page_count or 0
+
+        if not text.strip():
+            self.extract_feedback_var.set("Enter at least one page or page range.")
+            self.extract_button.configure(state="disabled")
+            return
+
+        try:
+            indices = extract_engine.resolve_pages_to_extract(text, page_count)
+        except split_engine.PageRangeError as exc:
+            self.extract_error_var.set(str(exc))
+            self.extract_feedback_var.set(f"Pages to extract: {text.strip()}")
+            self.extract_button.configure(state="disabled")
+            return
+
+        self.extract_feedback_var.set(
+            f"Pages to extract: {text.strip()}\n"
+            f"Pages selected: {len(indices)}"
+        )
+        self.extract_button.configure(
+            state="disabled" if self._any_operation_in_progress() else "normal"
+        )
+
+    def _update_extract_controls_state(self) -> None:
+        """The single place that restores Extract Pages' own controls to
+        their correct enabled state once no operation is running --
+        mirrors _update_split_controls_state()'s and
+        _update_remove_pages_controls_state()'s role for their own
+        tools.
+        """
+        self.extract_select_btn.configure(state="normal")
+        self.extract_clear_btn.configure(state="normal")
+        self.extract_selection_entry.configure(state="normal")
+        self._update_extract_feedback()
+
+    def _update_extract_source_label(self) -> None:
+        if self.extract_source is None:
+            self.extract_source_label.configure(text="No file selected.")
+        else:
+            self.extract_source_label.configure(
+                text=(
+                    f"{self.extract_source.name}  \u2014  "
+                    f"{self.extract_source.page_count_display}, "
+                    f"{self.extract_source.size_display}"
+                )
+            )
+
     def _select_tool(self, tool_id: str) -> None:
         """Switches the workspace to show the given tool. Unknown tool
         ids are a safe no-op -- selecting a tool that doesn't exist
@@ -676,12 +1236,18 @@ class MainWindow:
 
         self.merge_compress_view.pack_forget()
         self.split_view.pack_forget()
+        self.remove_pages_view.pack_forget()
+        self.extract_view.pack_forget()
         self.coming_soon_view.pack_forget()
 
         if tool_id == "merge_compress":
             self.merge_compress_view.pack(fill="both", expand=True, padx=28, pady=24)
         elif tool_id == "split":
             self.split_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "remove_pages":
+            self.remove_pages_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "extract_pages":
+            self.extract_view.pack(fill="both", expand=True, padx=28, pady=24)
         else:
             # Covers every coming_soon tool, and defensively covers a
             # future "available" tool that doesn't have its own
@@ -976,26 +1542,27 @@ class MainWindow:
     # ------------------------------------------------------------------
 
     def _any_operation_in_progress(self) -> bool:
-        """True if import, merge, compress, merge+compress, or a Split
-        PDF operation is currently running on a background thread. Used
-        as a defense-in-depth guard in every click handler below -- the
-        corresponding buttons are already disabled while an operation
-        runs (see _set_controls_enabled), so this mainly protects
-        against a stray double-click/Enter-key re-trigger or a direct
-        programmatic call (as in tests) rather than something reachable
-        through normal use.
+        """True if import, merge, compress, merge+compress, a Split PDF
+        operation, or a Remove Pages operation is currently running on a
+        background thread. Used as a defense-in-depth guard in every
+        click handler below -- the corresponding buttons are already
+        disabled while an operation runs (see _set_controls_enabled), so
+        this mainly protects against a stray double-click/Enter-key
+        re-trigger or a direct programmatic call (as in tests) rather
+        than something reachable through normal use.
 
         This is the single predicate every part of the UI (action
-        buttons, per-row file-list controls, Clear All, and -- Phase 13
-        -- Split PDF's own controls) agrees on for "is anything running
-        right now" -- the Phase 9 "one consistent operation-state
-        mechanism" requirement, now covering both tool workspaces.
-        Merge/Compress and Split PDF are treated as mutually exclusive
-        with each other too (not just within themselves): only one
+        buttons, per-row file-list controls, Clear All, Split PDF's own
+        controls, Remove Pages' own controls -- Phase 14 -- and Extract
+        Pages' own controls -- Phase 15) agrees on for "is anything
+        running right now" -- the Phase 9 "one consistent operation-
+        state mechanism" requirement, now covering all four tool
+        workspaces. Every tool is treated as mutually exclusive with
+        every other tool too (not just within itself): only one
         background PDF operation runs at a time app-wide, which is the
-        simplest, safest policy and avoids two threads touching
-        PyMuPDF concurrently (see the Phase 5 delivery notes on
-        multi-threaded PyMuPDF fragility).
+        simplest, safest policy and avoids two threads touching PyMuPDF
+        concurrently (see the Phase 5 delivery notes on multi-threaded
+        PyMuPDF fragility).
         """
         return (
             self._import_in_progress
@@ -1004,6 +1571,10 @@ class MainWindow:
             or self._mergecompress_in_progress
             or self._split_import_in_progress
             or self.split_in_progress
+            or self._remove_pages_import_in_progress
+            or self.remove_pages_in_progress
+            or self._extract_import_in_progress
+            or self.extract_in_progress
         )
 
     def _assert_main_thread(self) -> None:
@@ -1132,6 +1703,14 @@ class MainWindow:
 
         self._import_in_progress = False
         self._update_button_states()  # also restores select/add-more state
+        # Bug fix: import shares the single app-wide busy lock with
+        # Split PDF and Remove Pages (_set_controls_enabled(False) at the
+        # start of _start_import() disables their controls too), so
+        # completion must restore both as well -- otherwise they stay
+        # disabled until an operation of their own happens to run.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
 
         self.status_var.set(f"Status: {self._summarize_import(added, skipped_duplicates, errors)}")
 
@@ -1345,6 +1924,19 @@ class MainWindow:
         self.split_n_entry.configure(state=state)
         self.split_ranges_entry.configure(state=state)
 
+        # Phase 14: Remove Pages' own controls follow the same busy flag
+        # too, for the same reason Split's do -- see the class docstring
+        # above _any_operation_in_progress().
+        self.remove_pages_select_btn.configure(state=state)
+        self.remove_pages_clear_btn.configure(state=state)
+        self.remove_pages_selection_entry.configure(state=state)
+
+        # Phase 15: Extract Pages' own controls follow the same busy
+        # flag too, for the same reason Split's and Remove Pages' do.
+        self.extract_select_btn.configure(state=state)
+        self.extract_clear_btn.configure(state=state)
+        self.extract_selection_entry.configure(state=state)
+
         if enabled:
             # Restore the file-count-dependent rules for the three
             # action buttons (a flat "enabled" isn't correct for them).
@@ -1356,12 +1948,22 @@ class MainWindow:
             # "normal" above would otherwise leave both entries active
             # regardless of which split mode is actually selected.
             self._update_split_controls_state()
+            # Re-evaluate the current page selection -- the blanket
+            # "normal" above would otherwise leave REMOVE PAGES enabled
+            # even for an empty/invalid selection.
+            self._update_remove_pages_controls_state()
+            # Same re-evaluation for EXTRACT PAGES -- the blanket
+            # "normal" above would otherwise leave it enabled even for
+            # an empty/invalid selection or no source selected.
+            self._update_extract_controls_state()
         else:
             # Re-render immediately so per-row Remove/Move Up/Move Down
             # become disabled the instant an operation starts (they read
             # _any_operation_in_progress() at row-build time).
             self._render_file_list()
             self.split_button.configure(state="disabled")
+            self.remove_pages_button.configure(state="disabled")
+            self.extract_button.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # File list mutation (Phase 5: remove / reorder / clear)
@@ -1567,6 +2169,10 @@ class MainWindow:
 
         self._merge_in_progress = False
         self._update_button_states()  # also restores select/add/clear state
+        # Bug fix: see the matching comment in _apply_import_results().
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -1781,6 +2387,10 @@ class MainWindow:
 
         self._compress_in_progress = False
         self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results().
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -1814,6 +2424,10 @@ class MainWindow:
 
         self._compress_in_progress = False
         self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results().
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
 
         succeeded: List[dict] = result["succeeded"]
         failed: List[Tuple[str, str]] = result["failed"]
@@ -1965,6 +2579,10 @@ class MainWindow:
 
         self._mergecompress_in_progress = False
         self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results().
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
 
         if item["success"]:
             result: dict = item["result"]
@@ -2078,6 +2696,8 @@ class MainWindow:
 
         self._update_button_states()
         self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
 
     # ------------------------------------------------------------------
     # Split PDF: the actual split operation (Phase 13)
@@ -2208,8 +2828,6 @@ class MainWindow:
         self.split_progress_bar.configure(mode="determinate", value=0)
 
         self.split_in_progress = False
-        self._update_button_states()
-        self._update_split_controls_state()
 
         if item["success"]:
             result = item["result"]
@@ -2218,11 +2836,509 @@ class MainWindow:
                 f"Status: Split completed successfully. Created {n} "
                 f"file{'s' if n != 1 else ''}."
             )
+            # Bug fix: a completed split has fully consumed its source.
+            # Clear it (and its label) so the workspace returns to its
+            # non-file-selected initial state -- otherwise the same
+            # source stayed attached to the workspace after a
+            # successful split, letting a user accidentally re-split
+            # (or just be confused by) a file they already finished
+            # with. Must happen before _update_split_controls_state()
+            # below so the Split button correctly goes back to
+            # "disabled" (it depends on self.split_source).
+            self.split_source = None
+            self._update_split_source_label()
         else:
             self.split_status_var.set("Status: Split failed.")
             messagebox.showerror(
                 title="Split Failed", message=item["error"], parent=self.root,
             )
+
+        self._update_button_states()
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+
+    # ------------------------------------------------------------------
+    # Remove Pages: source file import (Phase 14)
+    # ------------------------------------------------------------------
+
+    def _on_remove_pages_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.remove_pages_status_var.set("Status: Ready")
+            return
+
+        self._start_remove_pages_import(path)
+
+    def _start_remove_pages_import(self, path: Path) -> None:
+        self._remove_pages_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.remove_pages_status_var.set("Status: Validating file...")
+        self.remove_pages_progress_bar.configure(mode="indeterminate")
+        self.remove_pages_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._remove_pages_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_remove_pages_import_queue)
+
+    def _remove_pages_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls pdf_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly.
+        """
+        try:
+            info = pdf_engine.get_pdf_info(path)
+            self._remove_pages_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._remove_pages_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._remove_pages_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_remove_pages_import_queue(self) -> None:
+        try:
+            result = self._remove_pages_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_remove_pages_import_queue)
+            return
+        self._apply_remove_pages_import_result(result)
+
+    def _apply_remove_pages_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.remove_pages_progress_bar.stop()
+        self.remove_pages_progress_bar.configure(mode="determinate", value=0)
+        self._remove_pages_import_in_progress = False
+
+        if result["success"]:
+            self.remove_pages_source = models.PDFFile(**result["info"])
+            self._update_remove_pages_source_label()
+            self.remove_pages_status_var.set(
+                f"Status: Selected '{self.remove_pages_source.name}'."
+            )
+        else:
+            self.remove_pages_source = None
+            self._update_remove_pages_source_label()
+            self.remove_pages_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Remove Pages' import shares the same app-wide busy lock, so its
+        # completion must restore Split's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+
+    def _on_remove_pages_clear_selection_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+        # Only resets the page-selection text, not the selected source
+        # PDF -- the user most likely wants to try a different selection
+        # against the same file, not re-pick the file too. Setting the
+        # StringVar fires the trace in _build_remove_pages_workspace(),
+        # which refreshes the preview/error/button state automatically.
+        self.remove_pages_selection_var.set("")
+
+    # ------------------------------------------------------------------
+    # Remove Pages: the actual remove-pages operation (Phase 14)
+    # ------------------------------------------------------------------
+
+    def _on_remove_pages_execute_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+        if self.remove_pages_source is None:
+            return  # defensive; button should be disabled without a source
+
+        page_count = self.remove_pages_source.page_count or 0
+        text = self.remove_pages_selection_var.get()
+
+        try:
+            indices = remove_pages_engine.resolve_pages_to_remove(text, page_count)
+        except split_engine.PageRangeError as exc:
+            self.remove_pages_error_var.set(str(exc))
+            self.remove_pages_status_var.set(f"Status: {exc}")
+            messagebox.showerror(
+                title="Invalid Page Selection", message=str(exc), parent=self.root,
+            )
+            return
+
+        # Sensible, project-consistent default filename for the native
+        # Save As dialog -- reusing file_manager's existing sanitization/
+        # extension helpers rather than inventing a second naming
+        # mechanism (Phase 14 requirement 8).
+        default_name = file_manager.ensure_pdf_extension(
+            file_manager.sanitize_windows_filename(
+                f"{self.remove_pages_source.path.stem}_without_pages"
+            )
+        )
+        output_path = file_manager.save_pdf_file(
+            parent=self.root,
+            default_name=default_name,
+            title="Save PDF Without Removed Pages As",
+        )
+        if output_path is None:
+            self.remove_pages_status_var.set("Status: Ready")
+            return
+
+        self._start_remove_pages(self.remove_pages_source.path, indices, output_path)
+
+    def _start_remove_pages(
+        self, source_path: Path, pages_to_remove: List[int], output_path: Path,
+    ) -> None:
+        self.remove_pages_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.remove_pages_status_var.set("Status: Removing pages...")
+        self.remove_pages_progress_bar.configure(mode="indeterminate")
+        self.remove_pages_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._remove_pages_worker,
+            args=(source_path, pages_to_remove, output_path),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_remove_pages_queue)
+
+    def _remove_pages_worker(
+        self, source_path: Path, pages_to_remove: List[int], output_path: Path,
+    ) -> None:
+        """Runs on a background thread. Calls
+        remove_pages_engine.remove_pages_from_pdf() directly. Must not
+        touch any tkinter widget; only the thread-safe queue is used to
+        report back.
+        """
+        def report(message: str) -> None:
+            self._remove_pages_queue.put({"type": "progress", "message": message})
+
+        try:
+            result_path = remove_pages_engine.remove_pages_from_pdf(
+                source_path, output_path, pages_to_remove,
+                progress_callback=report,
+            )
+            self._remove_pages_queue.put({
+                "type": "done", "success": True,
+                "output_path": result_path, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._remove_pages_queue.put({
+                "type": "done", "success": False,
+                "output_path": None, "error": str(exc),
+            })
+        except Exception:
+            self._remove_pages_queue.put({
+                "type": "done", "success": False, "output_path": None,
+                "error": "An unexpected error occurred while removing pages.",
+            })
+
+    def _poll_remove_pages_queue(self) -> None:
+        try:
+            while True:
+                item = self._remove_pages_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.remove_pages_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_remove_pages_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_remove_pages_queue)
+
+    def _apply_remove_pages_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.remove_pages_progress_bar.stop()
+        self.remove_pages_progress_bar.configure(mode="determinate", value=0)
+
+        self.remove_pages_in_progress = False
+
+        if item["success"]:
+            output_path = item["output_path"]
+            self.remove_pages_status_var.set(
+                f"Status: Pages removed successfully. Saved to "
+                f"'{output_path.name}'."
+            )
+            # A completed removal has fully consumed its source, mirroring
+            # Split PDF's own post-completion behavior (see
+            # _apply_split_result): clear it (and the selection text) so
+            # the workspace returns to its non-file-selected initial
+            # state, rather than leaving a stale source attached that
+            # invites an accidental repeat operation on a file that's
+            # already been processed. Must happen before
+            # _update_remove_pages_controls_state() below so REMOVE
+            # PAGES correctly goes back to "disabled" (it depends on
+            # self.remove_pages_source).
+            self.remove_pages_source = None
+            self._update_remove_pages_source_label()
+            self.remove_pages_selection_var.set("")
+        else:
+            self.remove_pages_status_var.set("Status: Remove Pages failed.")
+            messagebox.showerror(
+                title="Remove Pages Failed", message=item["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Remove Pages shares the same app-wide busy lock, so its
+        # completion must restore Split's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+
+    # ------------------------------------------------------------------
+    # Extract Pages: source file import (Phase 15)
+    # ------------------------------------------------------------------
+
+    def _on_extract_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.extract_status_var.set("Status: Ready")
+            return
+
+        self._start_extract_import(path)
+
+    def _start_extract_import(self, path: Path) -> None:
+        self._extract_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.extract_status_var.set("Status: Validating file...")
+        self.extract_progress_bar.configure(mode="indeterminate")
+        self.extract_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._extract_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_extract_import_queue)
+
+    def _extract_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls pdf_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly.
+        """
+        try:
+            info = pdf_engine.get_pdf_info(path)
+            self._extract_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._extract_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._extract_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_extract_import_queue(self) -> None:
+        try:
+            result = self._extract_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_extract_import_queue)
+            return
+        self._apply_extract_import_result(result)
+
+    def _apply_extract_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.extract_progress_bar.stop()
+        self.extract_progress_bar.configure(mode="determinate", value=0)
+        self._extract_import_in_progress = False
+
+        if result["success"]:
+            self.extract_source = models.PDFFile(**result["info"])
+            self._update_extract_source_label()
+            self.extract_status_var.set(
+                f"Status: Selected '{self.extract_source.name}'."
+            )
+        else:
+            self.extract_source = None
+            self._update_extract_source_label()
+            self.extract_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Extract Pages' import shares the same app-wide busy lock, so
+        # its completion must restore Split's and Remove Pages' controls
+        # too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+
+    def _on_extract_clear_selection_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+        # Only resets the page-selection text, not the selected source
+        # PDF -- the user most likely wants to try a different selection
+        # against the same file, not re-pick the file too. Setting the
+        # StringVar fires the trace in _build_extract_workspace(), which
+        # refreshes the preview/error/button state automatically.
+        self.extract_selection_var.set("")
+
+    # ------------------------------------------------------------------
+    # Extract Pages: the actual extract operation (Phase 15)
+    # ------------------------------------------------------------------
+
+    def _on_extract_execute_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+        if self.extract_source is None:
+            return  # defensive; button should be disabled without a source
+
+        page_count = self.extract_source.page_count or 0
+        text = self.extract_selection_var.get()
+
+        try:
+            indices = extract_engine.resolve_pages_to_extract(text, page_count)
+        except split_engine.PageRangeError as exc:
+            self.extract_error_var.set(str(exc))
+            self.extract_status_var.set(f"Status: {exc}")
+            messagebox.showerror(
+                title="Invalid Page Selection", message=str(exc), parent=self.root,
+            )
+            return
+
+        # Sensible, project-consistent default filename for the native
+        # Save As dialog -- reusing file_manager's existing sanitization/
+        # extension helpers rather than inventing a second naming
+        # mechanism, exactly like Remove Pages does.
+        default_name = file_manager.ensure_pdf_extension(
+            file_manager.sanitize_windows_filename(
+                f"{self.extract_source.path.stem}_extracted"
+            )
+        )
+        output_path = file_manager.save_pdf_file(
+            parent=self.root,
+            default_name=default_name,
+            title="Save Extracted Pages As",
+        )
+        if output_path is None:
+            self.extract_status_var.set("Status: Ready")
+            return
+
+        self._start_extract(self.extract_source.path, indices, output_path)
+
+    def _start_extract(
+        self, source_path: Path, page_indices: List[int], output_path: Path,
+    ) -> None:
+        self.extract_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.extract_status_var.set("Status: Extracting pages...")
+        self.extract_progress_bar.configure(mode="indeterminate")
+        self.extract_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._extract_worker,
+            args=(source_path, page_indices, output_path),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_extract_queue)
+
+    def _extract_worker(
+        self, source_path: Path, page_indices: List[int], output_path: Path,
+    ) -> None:
+        """Runs on a background thread. Calls
+        extract_engine.extract_pages_from_pdf() directly. Must not touch
+        any tkinter widget; only the thread-safe queue is used to report
+        back.
+        """
+        def report(message: str) -> None:
+            self._extract_queue.put({"type": "progress", "message": message})
+
+        try:
+            result_path = extract_engine.extract_pages_from_pdf(
+                source_path, output_path, page_indices,
+                progress_callback=report,
+            )
+            self._extract_queue.put({
+                "type": "done", "success": True,
+                "output_path": result_path, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._extract_queue.put({
+                "type": "done", "success": False,
+                "output_path": None, "error": str(exc),
+            })
+        except Exception:
+            self._extract_queue.put({
+                "type": "done", "success": False, "output_path": None,
+                "error": "An unexpected error occurred while extracting pages.",
+            })
+
+    def _poll_extract_queue(self) -> None:
+        try:
+            while True:
+                item = self._extract_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.extract_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_extract_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_extract_queue)
+
+    def _apply_extract_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.extract_progress_bar.stop()
+        self.extract_progress_bar.configure(mode="determinate", value=0)
+
+        self.extract_in_progress = False
+
+        if item["success"]:
+            output_path = item["output_path"]
+            self.extract_status_var.set(
+                f"Status: Pages extracted successfully. Saved to "
+                f"'{output_path.name}'."
+            )
+            # A completed extraction has fully consumed its source,
+            # mirroring Split PDF's and Remove Pages' own post-
+            # completion behavior: clear it (and the selection text) so
+            # the workspace returns to its non-file-selected initial
+            # state, rather than leaving a stale source attached that
+            # invites an accidental repeat operation on a file that's
+            # already been processed. Must happen before
+            # _update_extract_controls_state() below so EXTRACT PAGES
+            # correctly goes back to "disabled" (it depends on
+            # self.extract_source).
+            self.extract_source = None
+            self._update_extract_source_label()
+            self.extract_selection_var.set("")
+        else:
+            self.extract_status_var.set("Status: Extract Pages failed.")
+            messagebox.showerror(
+                title="Extract Pages Failed", message=item["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Extract Pages shares the same app-wide busy lock, so its
+        # completion must restore Split's and Remove Pages' controls
+        # too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
 
 
 def run() -> None:
