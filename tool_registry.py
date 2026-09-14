@@ -101,8 +101,8 @@ EXTRACT_PAGES = Tool(
 ORGANIZE_PAGES = Tool(
     id="organize_pages",
     name="Organize Pages",
-    description="Reorder, rotate, or remove pages within a single PDF.",
-    status=STATUS_COMING_SOON,
+    description="Reorder the pages of a PDF and save as a new file.",
+    status=STATUS_AVAILABLE,
     category="organize",
 )
 

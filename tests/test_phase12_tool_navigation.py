@@ -69,18 +69,19 @@ def test_nav_sidebar_lists_every_registered_tool(window):
 # ---------------------------------------------------------------------------
 
 def test_selecting_a_coming_soon_tool_shows_placeholder(window):
-    # Uses "organize_pages" rather than "split", "remove_pages", or
-    # "extract_pages" -- Phase 13 made Split, Phase 14 made Remove
-    # Pages, and Phase 15 made Extract Pages real, available tools with
-    # their own dedicated workspaces, so none of them is a valid example
-    # of the generic coming-soon placeholder anymore.
-    window._select_tool("organize_pages")
+    # Uses "rotate" rather than "split", "remove_pages", "extract_pages",
+    # or "organize_pages" -- Phase 13 made Split, Phase 14 made Remove
+    # Pages, Phase 15 made Extract Pages, and Phase 16 made Organize
+    # Pages real, available tools with their own dedicated workspaces,
+    # so none of them is a valid example of the generic coming-soon
+    # placeholder anymore.
+    window._select_tool("rotate")
     window.root.update()
 
-    assert window.current_tool_id == "organize_pages"
+    assert window.current_tool_id == "rotate"
     assert not window.merge_compress_view.winfo_ismapped()
     assert window.coming_soon_view.winfo_ismapped()
-    assert window.coming_soon_title_label.cget("text") == "Organize Pages"
+    assert window.coming_soon_title_label.cget("text") == "Rotate PDF"
 
     window._select_tool("merge_compress")
     window.root.update()
@@ -142,15 +143,16 @@ def test_selecting_unknown_tool_id_is_a_safe_noop(window):
 
 
 def test_selecting_unknown_tool_id_while_on_a_coming_soon_tool_is_a_noop(window):
-    # "organize_pages" rather than "split"/"extract_pages" -- see the
-    # note in test_selecting_a_coming_soon_tool_shows_placeholder above.
-    window._select_tool("organize_pages")
+    # "rotate" rather than "split"/"extract_pages"/"organize_pages" --
+    # see the note in test_selecting_a_coming_soon_tool_shows_placeholder
+    # above.
+    window._select_tool("rotate")
     window.root.update()
 
     window._select_tool("totally_bogus_id")
     window.root.update()
 
-    assert window.current_tool_id == "organize_pages"
+    assert window.current_tool_id == "rotate"
     assert window.coming_soon_view.winfo_ismapped()
 
     window._select_tool("merge_compress")

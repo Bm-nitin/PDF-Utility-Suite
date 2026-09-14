@@ -73,6 +73,7 @@ from tkinter import messagebox, ttk
 import extract_engine
 import file_manager
 import models
+import organize_engine
 import pdf_engine
 import remove_pages_engine
 import split_engine
@@ -273,6 +274,28 @@ class MainWindow:
         self._extract_queue: "queue.Queue[dict]" = queue.Queue()
         self.extract_in_progress = False
 
+        # Phase 16: Organize/Reorder Pages' own state, deliberately
+        # separate from every other tool's -- shape-wise closest to
+        # Extract Pages' (single source + a live-validated order text),
+        # but the text represents a *complete permutation* of every
+        # source page rather than a subset. self._organize_current_order
+        # is the 0-based order most recently successfully parsed from
+        # organize_order_var's text -- it's what Move Up/Move Down
+        # operate on (see _on_organize_move_up_clicked() /
+        # _on_organize_move_down_clicked()); it is kept in sync with the
+        # text any time the text parses successfully (see
+        # _update_organize_feedback()), and is None whenever the text
+        # does not currently represent a valid, complete order.
+        self.organize_source: Optional[models.PDFFile] = None
+        self.organize_order_var = tk.StringVar(value="")
+        self.organize_status_var = tk.StringVar(value="Status: Ready")
+        self._organize_current_order: Optional[List[int]] = None
+
+        self._organize_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._organize_import_in_progress = False
+        self._organize_queue: "queue.Queue[dict]" = queue.Queue()
+        self.organize_in_progress = False
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -425,6 +448,7 @@ class MainWindow:
         self._build_split_workspace(self.workspace_container)
         self._build_remove_pages_workspace(self.workspace_container)
         self._build_extract_workspace(self.workspace_container)
+        self._build_organize_workspace(self.workspace_container)
 
         self._select_tool(self.current_tool_id)
 
@@ -1223,6 +1247,354 @@ class MainWindow:
                 )
             )
 
+    def _build_organize_workspace(self, parent: tk.Widget) -> None:
+        """Phase 16: the Organize/Reorder Pages tool's dedicated
+        workspace.
+
+        Follows the same overall shape as _build_extract_workspace()
+        above (its own state, its own view frame, same cards/buttons/
+        status styling), with one addition: a read-only Listbox that
+        mirrors the current order as "Page N" rows, driven by Move Up /
+        Move Down / Reset, alongside the free-text order entry that
+        Split/Remove Pages/Extract all already use for live-validated
+        input. The text entry stays the single source of truth (it is
+        what actually gets parsed and sent to the engine); the listbox
+        is just a friendlier view onto it for the Move Up/Down/Reset
+        controls this phase specifically requires, so there is no risk
+        of the two ever silently disagreeing -- every edit, from either
+        surface, always goes back through organize_order_var and
+        _update_organize_feedback() (see there).
+        """
+        self.organize_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.organize_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="ORGANIZE PAGES", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Reorder the pages of a PDF and save as a new file -- locally, no upload.",
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Source file card
+        source_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        source_card.pack(fill="x", pady=(0, 16))
+        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner.pack(fill="x", padx=18, pady=16)
+
+        self.organize_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_organize_select_file_clicked,
+        )
+        self.organize_select_btn.pack(side="left")
+
+        self.organize_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.organize_source_label.pack(side="left", padx=(16, 0))
+
+        # Order card: text entry (source of truth) + listbox preview +
+        # Move Up / Move Down / Reset / Clear
+        order_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        order_card.pack(fill="both", expand=True, pady=(0, 16))
+        order_inner = tk.Frame(order_card, bg=COLOR_CARD)
+        order_inner.pack(fill="both", expand=True, padx=18, pady=14)
+
+        tk.Label(
+            order_inner, text="Page Order",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        entry_row = tk.Frame(order_inner, bg=COLOR_CARD)
+        entry_row.pack(fill="x")
+        self.organize_order_entry = ttk.Entry(
+            entry_row, textvariable=self.organize_order_var, width=40,
+        )
+        self.organize_order_entry.pack(side="left", fill="x", expand=True)
+        self.organize_reset_btn = ttk.Button(
+            entry_row, text="Reset", style="Secondary.TButton",
+            command=self._on_organize_reset_clicked,
+        )
+        self.organize_reset_btn.pack(side="left", padx=(8, 0))
+        self.organize_clear_btn = ttk.Button(
+            entry_row, text="Clear", style="Secondary.TButton",
+            command=self._on_organize_clear_clicked,
+        )
+        self.organize_clear_btn.pack(side="left", padx=(8, 0))
+
+        tk.Label(
+            order_inner,
+            text=(
+                "Every page must appear exactly once, e.g. \"3,1,5,2,4\" "
+                "for a 5-page document. No ranges -- list each page "
+                "individually. Reset restores 1,2,3,...  (no change)."
+            ),
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 10))
+
+        body_row = tk.Frame(order_inner, bg=COLOR_CARD)
+        body_row.pack(fill="both", expand=True)
+
+        listbox_frame = tk.Frame(body_row, bg=COLOR_CARD)
+        listbox_frame.pack(side="left", fill="both", expand=True)
+        tk.Label(
+            listbox_frame, text="Resulting order:",
+            font=("Segoe UI", 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w")
+        listbox_scroll = ttk.Scrollbar(listbox_frame, orient="vertical")
+        self.organize_order_listbox = tk.Listbox(
+            listbox_frame, height=8, exportselection=False,
+            yscrollcommand=listbox_scroll.set,
+        )
+        listbox_scroll.configure(command=self.organize_order_listbox.yview)
+        self.organize_order_listbox.pack(side="left", fill="both", expand=True, pady=(4, 0))
+        listbox_scroll.pack(side="left", fill="y", pady=(4, 0))
+        self.organize_order_listbox.bind(
+            "<<ListboxSelect>>", self._on_organize_listbox_select
+        )
+
+        move_buttons = tk.Frame(body_row, bg=COLOR_CARD)
+        move_buttons.pack(side="left", fill="y", padx=(12, 0))
+        self.organize_move_up_btn = ttk.Button(
+            move_buttons, text="Move Up", style="Secondary.TButton",
+            command=self._on_organize_move_up_clicked, state="disabled",
+        )
+        self.organize_move_up_btn.pack(fill="x", pady=(4, 4))
+        self.organize_move_down_btn = ttk.Button(
+            move_buttons, text="Move Down", style="Secondary.TButton",
+            command=self._on_organize_move_down_clicked, state="disabled",
+        )
+        self.organize_move_down_btn.pack(fill="x")
+
+        self.organize_feedback_var = tk.StringVar(value="")
+        self.organize_feedback_label = tk.Label(
+            order_inner, textvariable=self.organize_feedback_var,
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            justify="left", anchor="w",
+        )
+        self.organize_feedback_label.pack(fill="x", pady=(10, 0))
+
+        self.organize_error_var = tk.StringVar(value="")
+        self.organize_error_label = tk.Label(
+            order_inner, textvariable=self.organize_error_var,
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            justify="left", anchor="w", wraplength=520,
+        )
+        self.organize_error_label.pack(fill="x", pady=(4, 0))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.organize_button = ttk.Button(
+            action_wrapper, text="ORGANIZE PAGES", style="Primary.TButton",
+            command=self._on_organize_execute_clicked, state="disabled",
+        )
+        self.organize_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.organize_status_label = tk.Label(
+            status_frame, textvariable=self.organize_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.organize_status_label.pack(fill="x", pady=(0, 6))
+        self.organize_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.organize_progress_bar.pack(fill="x")
+
+        # Live validation feedback as the user types -- driven purely by
+        # organize_engine.parse_page_order() (no PDF write), exactly
+        # like Split/Remove Pages/Extract's own entry fields.
+        self.organize_order_var.trace_add(
+            "write", self._on_organize_order_changed
+        )
+        self._update_organize_feedback()
+
+    def _on_organize_order_changed(self, *_args) -> None:
+        self._update_organize_feedback()
+
+    def _update_organize_feedback(self) -> None:
+        """The single place that keeps the resulting-order listbox, the
+        validation error message, the Move Up/Move Down button states,
+        and the ORGANIZE PAGES button's enabled state all in sync with
+        the current order text -- driven purely by
+        organize_engine.parse_page_order() (no PDF write), so bad input
+        is caught instantly and can never crash the UI (every
+        OrganizeOrderError is caught right here).
+        """
+        text = self.organize_order_var.get()
+        self.organize_error_var.set("")
+
+        if self.organize_source is None:
+            self._organize_current_order = None
+            self._rebuild_organize_listbox(None)
+            self.organize_feedback_var.set("Select a PDF file first.")
+            self.organize_button.configure(state="disabled")
+            self._update_organize_move_buttons_state()
+            return
+
+        page_count = self.organize_source.page_count or 0
+
+        if not text.strip():
+            self._organize_current_order = None
+            self._rebuild_organize_listbox(None)
+            self.organize_feedback_var.set("Enter a complete page order.")
+            self.organize_button.configure(state="disabled")
+            self._update_organize_move_buttons_state()
+            return
+
+        try:
+            order = organize_engine.parse_page_order(text, page_count)
+        except organize_engine.OrganizeOrderError as exc:
+            self._organize_current_order = None
+            self._rebuild_organize_listbox(None)
+            self.organize_error_var.set(str(exc))
+            self.organize_feedback_var.set(f"Requested order: {text.strip()}")
+            self.organize_button.configure(state="disabled")
+            self._update_organize_move_buttons_state()
+            return
+
+        self._organize_current_order = order
+        self._rebuild_organize_listbox(order)
+        is_identity = order == list(range(page_count))
+        self.organize_feedback_var.set(
+            f"Requested order: {text.strip()}\n"
+            f"{page_count} page{'s' if page_count != 1 else ''} placed"
+            + (" (no change from original order)" if is_identity else ".")
+        )
+        self.organize_button.configure(
+            state="disabled" if self._any_operation_in_progress() else "normal"
+        )
+        self._update_organize_move_buttons_state()
+
+    def _rebuild_organize_listbox(self, order: Optional[List[int]]) -> None:
+        selection = self.organize_order_listbox.curselection()
+        selected_index = selection[0] if selection else None
+
+        self.organize_order_listbox.delete(0, tk.END)
+        if not order:
+            return
+        for position, page_index in enumerate(order, start=1):
+            self.organize_order_listbox.insert(
+                tk.END, f"{position}.  Page {page_index + 1}"
+            )
+        if selected_index is not None and selected_index < len(order):
+            self.organize_order_listbox.selection_set(selected_index)
+
+    def _on_organize_listbox_select(self, _event=None) -> None:
+        self._update_organize_move_buttons_state()
+
+    def _update_organize_move_buttons_state(self) -> None:
+        """Move Up/Move Down are only meaningful when the order is
+        currently valid (there is a coherent list to move within) AND a
+        row is selected AND no operation is running -- otherwise both
+        are disabled. Being at the very top/bottom of the list disables
+        just that one direction.
+        """
+        busy = self._any_operation_in_progress()
+        selection = self.organize_order_listbox.curselection()
+        order = self._organize_current_order
+
+        if busy or order is None or not selection:
+            self.organize_move_up_btn.configure(state="disabled")
+            self.organize_move_down_btn.configure(state="disabled")
+            return
+
+        index = selection[0]
+        self.organize_move_up_btn.configure(
+            state="disabled" if index <= 0 else "normal"
+        )
+        self.organize_move_down_btn.configure(
+            state="disabled" if index >= len(order) - 1 else "normal"
+        )
+
+    def _on_organize_move_up_clicked(self) -> None:
+        self._organize_move_selected(-1)
+
+    def _on_organize_move_down_clicked(self) -> None:
+        self._organize_move_selected(1)
+
+    def _organize_move_selected(self, delta: int) -> None:
+        if self._any_operation_in_progress() or self._organize_current_order is None:
+            return
+        selection = self.organize_order_listbox.curselection()
+        if not selection:
+            return
+        index = selection[0]
+        new_index = index + delta
+        order = list(self._organize_current_order)
+        if new_index < 0 or new_index >= len(order):
+            return
+
+        order[index], order[new_index] = order[new_index], order[index]
+        # Setting the StringVar fires _on_organize_order_changed(),
+        # which re-parses this exact text, repopulates
+        # self._organize_current_order, and rebuilds the listbox -- the
+        # text entry stays the single source of truth even for a
+        # button-driven change (see _build_organize_workspace()'s
+        # docstring).
+        self.organize_order_var.set(",".join(str(p + 1) for p in order))
+        self.organize_order_listbox.selection_clear(0, tk.END)
+        self.organize_order_listbox.selection_set(new_index)
+        self.organize_order_listbox.see(new_index)
+        self._update_organize_move_buttons_state()
+
+    def _on_organize_reset_clicked(self) -> None:
+        if self._any_operation_in_progress() or self.organize_source is None:
+            return
+        page_count = self.organize_source.page_count or 0
+        self.organize_order_var.set(organize_engine.identity_order(page_count))
+
+    def _on_organize_clear_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+        # Only resets the order text, not the selected source PDF -- the
+        # user most likely wants to try a different order against the
+        # same file, not re-pick the file too (mirrors Extract Pages'
+        # own Clear Selection behavior).
+        self.organize_order_var.set("")
+
+    def _update_organize_controls_state(self) -> None:
+        """The single place that restores Organize Pages' own controls
+        to their correct enabled state once no operation is running --
+        mirrors _update_extract_controls_state()'s role for its own
+        tool.
+        """
+        self.organize_select_btn.configure(state="normal")
+        self.organize_reset_btn.configure(state="normal")
+        self.organize_clear_btn.configure(state="normal")
+        self.organize_order_entry.configure(state="normal")
+        self.organize_order_listbox.configure(state="normal")
+        self._update_organize_feedback()
+
+    def _update_organize_source_label(self) -> None:
+        if self.organize_source is None:
+            self.organize_source_label.configure(text="No file selected.")
+        else:
+            self.organize_source_label.configure(
+                text=(
+                    f"{self.organize_source.name}  \u2014  "
+                    f"{self.organize_source.page_count_display}, "
+                    f"{self.organize_source.size_display}"
+                )
+            )
+
     def _select_tool(self, tool_id: str) -> None:
         """Switches the workspace to show the given tool. Unknown tool
         ids are a safe no-op -- selecting a tool that doesn't exist
@@ -1238,6 +1610,7 @@ class MainWindow:
         self.split_view.pack_forget()
         self.remove_pages_view.pack_forget()
         self.extract_view.pack_forget()
+        self.organize_view.pack_forget()
         self.coming_soon_view.pack_forget()
 
         if tool_id == "merge_compress":
@@ -1248,6 +1621,8 @@ class MainWindow:
             self.remove_pages_view.pack(fill="both", expand=True, padx=28, pady=24)
         elif tool_id == "extract_pages":
             self.extract_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "organize_pages":
+            self.organize_view.pack(fill="both", expand=True, padx=28, pady=24)
         else:
             # Covers every coming_soon tool, and defensively covers a
             # future "available" tool that doesn't have its own
@@ -1553,16 +1928,16 @@ class MainWindow:
 
         This is the single predicate every part of the UI (action
         buttons, per-row file-list controls, Clear All, Split PDF's own
-        controls, Remove Pages' own controls -- Phase 14 -- and Extract
-        Pages' own controls -- Phase 15) agrees on for "is anything
-        running right now" -- the Phase 9 "one consistent operation-
-        state mechanism" requirement, now covering all four tool
-        workspaces. Every tool is treated as mutually exclusive with
-        every other tool too (not just within itself): only one
-        background PDF operation runs at a time app-wide, which is the
-        simplest, safest policy and avoids two threads touching PyMuPDF
-        concurrently (see the Phase 5 delivery notes on multi-threaded
-        PyMuPDF fragility).
+        controls, Remove Pages' own controls -- Phase 14, Extract
+        Pages' own controls -- Phase 15, and Organize Pages' own
+        controls -- Phase 16) agrees on for "is anything running right
+        now" -- the Phase 9 "one consistent operation-state mechanism"
+        requirement, now covering all five tool workspaces. Every tool
+        is treated as mutually exclusive with every other tool too (not
+        just within itself): only one background PDF operation runs at
+        a time app-wide, which is the simplest, safest policy and
+        avoids two threads touching PyMuPDF concurrently (see the
+        Phase 5 delivery notes on multi-threaded PyMuPDF fragility).
         """
         return (
             self._import_in_progress
@@ -1575,6 +1950,8 @@ class MainWindow:
             or self.remove_pages_in_progress
             or self._extract_import_in_progress
             or self.extract_in_progress
+            or self._organize_import_in_progress
+            or self.organize_in_progress
         )
 
     def _assert_main_thread(self) -> None:
@@ -1711,6 +2088,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
         self.status_var.set(f"Status: {self._summarize_import(added, skipped_duplicates, errors)}")
 
@@ -1937,6 +2315,21 @@ class MainWindow:
         self.extract_clear_btn.configure(state=state)
         self.extract_selection_entry.configure(state=state)
 
+        # Phase 16: Organize Pages' own controls follow the same busy
+        # flag too, for the same reason every other tool's do. Move Up/
+        # Move Down are additionally gated on selection + order validity
+        # (see _update_organize_move_buttons_state()) -- setting them
+        # blanket-disabled here while busy is still correct, since
+        # _update_organize_controls_state() (called below when
+        # re-enabling) re-derives their real state afterward rather than
+        # leaving them blanket "normal".
+        self.organize_select_btn.configure(state=state)
+        self.organize_reset_btn.configure(state=state)
+        self.organize_clear_btn.configure(state=state)
+        self.organize_order_entry.configure(state=state)
+        self.organize_move_up_btn.configure(state="disabled")
+        self.organize_move_down_btn.configure(state="disabled")
+
         if enabled:
             # Restore the file-count-dependent rules for the three
             # action buttons (a flat "enabled" isn't correct for them).
@@ -1956,6 +2349,11 @@ class MainWindow:
             # "normal" above would otherwise leave it enabled even for
             # an empty/invalid selection or no source selected.
             self._update_extract_controls_state()
+            # Same re-evaluation for ORGANIZE PAGES -- also re-derives
+            # Move Up/Move Down's real state from the current selection
+            # and order validity, rather than leaving them blanket
+            # "disabled" forever.
+            self._update_organize_controls_state()
         else:
             # Re-render immediately so per-row Remove/Move Up/Move Down
             # become disabled the instant an operation starts (they read
@@ -1964,6 +2362,7 @@ class MainWindow:
             self.split_button.configure(state="disabled")
             self.remove_pages_button.configure(state="disabled")
             self.extract_button.configure(state="disabled")
+            self.organize_button.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # File list mutation (Phase 5: remove / reorder / clear)
@@ -2173,6 +2572,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -2391,6 +2791,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -2428,6 +2829,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
         succeeded: List[dict] = result["succeeded"]
         failed: List[Tuple[str, str]] = result["failed"]
@@ -2583,6 +2985,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
         if item["success"]:
             result: dict = item["result"]
@@ -2698,6 +3101,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
     # ------------------------------------------------------------------
     # Split PDF: the actual split operation (Phase 13)
@@ -2857,6 +3261,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
     # ------------------------------------------------------------------
     # Remove Pages: source file import (Phase 14)
@@ -2942,6 +3347,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
     def _on_remove_pages_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -3097,6 +3503,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
     # ------------------------------------------------------------------
     # Extract Pages: source file import (Phase 15)
@@ -3183,6 +3590,7 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
     def _on_extract_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -3339,6 +3747,246 @@ class MainWindow:
         self._update_split_controls_state()
         self._update_remove_pages_controls_state()
         self._update_extract_controls_state()
+        self._update_organize_controls_state()
+
+    # ------------------------------------------------------------------
+    # Organize/Reorder Pages: source file import (Phase 16)
+    # ------------------------------------------------------------------
+
+    def _on_organize_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.organize_status_var.set("Status: Ready")
+            return
+
+        self._start_organize_import(path)
+
+    def _start_organize_import(self, path: Path) -> None:
+        self._organize_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.organize_status_var.set("Status: Validating file...")
+        self.organize_progress_bar.configure(mode="indeterminate")
+        self.organize_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._organize_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_organize_import_queue)
+
+    def _organize_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls pdf_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly.
+        """
+        try:
+            info = pdf_engine.get_pdf_info(path)
+            self._organize_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._organize_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._organize_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_organize_import_queue(self) -> None:
+        try:
+            result = self._organize_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_organize_import_queue)
+            return
+        self._apply_organize_import_result(result)
+
+    def _apply_organize_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.organize_progress_bar.stop()
+        self.organize_progress_bar.configure(mode="determinate", value=0)
+        self._organize_import_in_progress = False
+
+        if result["success"]:
+            self.organize_source = models.PDFFile(**result["info"])
+            self._update_organize_source_label()
+            # Initial state (Phase 16 requirement 5): the order starts
+            # as "1,2,3,...,N" -- i.e. "no change" -- which the user can
+            # then modify via the entry, Move Up/Move Down, or Reset.
+            self.organize_order_var.set(
+                organize_engine.identity_order(self.organize_source.page_count or 0)
+            )
+            self.organize_status_var.set(
+                f"Status: Selected '{self.organize_source.name}'."
+            )
+        else:
+            self.organize_source = None
+            self._update_organize_source_label()
+            self.organize_order_var.set("")
+            self.organize_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Organize Pages' import shares the same app-wide busy lock, so
+        # its completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+
+    # ------------------------------------------------------------------
+    # Organize/Reorder Pages: the actual reorder operation (Phase 16)
+    # ------------------------------------------------------------------
+
+    def _on_organize_execute_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+        if self.organize_source is None:
+            return  # defensive; button should be disabled without a source
+
+        page_count = self.organize_source.page_count or 0
+        text = self.organize_order_var.get()
+
+        try:
+            order = organize_engine.parse_page_order(text, page_count)
+        except organize_engine.OrganizeOrderError as exc:
+            self.organize_error_var.set(str(exc))
+            self.organize_status_var.set(f"Status: {exc}")
+            messagebox.showerror(
+                title="Invalid Page Order", message=str(exc), parent=self.root,
+            )
+            return
+
+        # Sensible, project-consistent default filename for the native
+        # Save As dialog -- reusing file_manager's existing sanitization/
+        # extension helpers rather than inventing a second naming
+        # mechanism, exactly like Extract Pages and Remove Pages do.
+        default_name = file_manager.ensure_pdf_extension(
+            file_manager.sanitize_windows_filename(
+                f"{self.organize_source.path.stem}_organized"
+            )
+        )
+        output_path = file_manager.save_pdf_file(
+            parent=self.root,
+            default_name=default_name,
+            title="Save Reordered Pages As",
+        )
+        if output_path is None:
+            self.organize_status_var.set("Status: Ready")
+            return
+
+        self._start_organize(self.organize_source.path, order, output_path)
+
+    def _start_organize(
+        self, source_path: Path, page_order: List[int], output_path: Path,
+    ) -> None:
+        self.organize_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.organize_status_var.set("Status: Reordering pages...")
+        self.organize_progress_bar.configure(mode="indeterminate")
+        self.organize_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._organize_worker,
+            args=(source_path, page_order, output_path),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_organize_queue)
+
+    def _organize_worker(
+        self, source_path: Path, page_order: List[int], output_path: Path,
+    ) -> None:
+        """Runs on a background thread. Calls
+        organize_engine.organize_pages_from_pdf() directly. Must not
+        touch any tkinter widget; only the thread-safe queue is used to
+        report back.
+        """
+        def report(message: str) -> None:
+            self._organize_queue.put({"type": "progress", "message": message})
+
+        try:
+            result_path = organize_engine.organize_pages_from_pdf(
+                source_path, output_path, page_order,
+                progress_callback=report,
+            )
+            self._organize_queue.put({
+                "type": "done", "success": True,
+                "output_path": result_path, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._organize_queue.put({
+                "type": "done", "success": False,
+                "output_path": None, "error": str(exc),
+            })
+        except Exception:
+            self._organize_queue.put({
+                "type": "done", "success": False, "output_path": None,
+                "error": "An unexpected error occurred while reordering pages.",
+            })
+
+    def _poll_organize_queue(self) -> None:
+        try:
+            while True:
+                item = self._organize_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.organize_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_organize_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_organize_queue)
+
+    def _apply_organize_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.organize_progress_bar.stop()
+        self.organize_progress_bar.configure(mode="determinate", value=0)
+
+        self.organize_in_progress = False
+
+        if item["success"]:
+            output_path = item["output_path"]
+            self.organize_status_var.set(
+                f"Status: Pages reordered successfully. Saved to "
+                f"'{output_path.name}'."
+            )
+            # A completed reorder has fully consumed its source,
+            # mirroring Split PDF's, Remove Pages', and Extract Pages'
+            # own post-completion behavior: clear it (and the order
+            # text) so the workspace returns to its non-file-selected
+            # initial state, rather than leaving a stale source attached
+            # that invites an accidental repeat operation on a file
+            # that's already been processed. Must happen before
+            # _update_organize_controls_state() below so ORGANIZE PAGES
+            # correctly goes back to "disabled" (it depends on
+            # self.organize_source).
+            self.organize_source = None
+            self._update_organize_source_label()
+            self.organize_order_var.set("")
+        else:
+            self.organize_status_var.set("Status: Organize Pages failed.")
+            messagebox.showerror(
+                title="Organize Pages Failed", message=item["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Organize Pages shares the same app-wide busy lock, so its
+        # completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
 
 
 def run() -> None:
