@@ -110,7 +110,7 @@ ROTATE = Tool(
     id="rotate",
     name="Rotate PDF",
     description="Rotate one or more pages of a PDF.",
-    status=STATUS_COMING_SOON,
+    status=STATUS_AVAILABLE,
     category="organize",
 )
 
