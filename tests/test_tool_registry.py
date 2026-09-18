@@ -55,22 +55,22 @@ def test_tool_is_immutable():
 # Registry contents
 # ---------------------------------------------------------------------------
 
-def test_merge_compress_split_remove_extract_organize_and_rotate_are_the_available_tools():
+def test_merge_compress_split_remove_extract_organize_rotate_and_protect_are_the_available_tools():
     """Phase 13 made Split PDF the second real, working tool; Phase 14
     made Remove Pages the third; Phase 15 made Extract Pages the fourth;
-    Phase 16 made Organize Pages the fifth; Phase 17 makes Rotate the
-    sixth. Every other future tool remains coming_soon until its own
-    phase.
+    Phase 16 made Organize Pages the fifth; Phase 17 made Rotate the
+    sixth; Phase 18 makes Protect PDF the seventh. Every other future
+    tool remains coming_soon until its own phase.
     """
     available_ids = {t.id for t in tool_registry.get_all_tools() if t.is_available}
     assert available_ids == {
         "merge_compress", "split", "remove_pages", "extract_pages",
-        "organize_pages", "rotate",
+        "organize_pages", "rotate", "protect",
     }
 
 
-def test_five_future_tools_are_registered_as_coming_soon():
-    expected_ids = {"protect", "unlock", "page_numbers", "watermark", "images_to_pdf"}
+def test_four_future_tools_are_registered_as_coming_soon():
+    expected_ids = {"unlock", "page_numbers", "watermark", "images_to_pdf"}
     coming_soon_ids = {
         t.id for t in tool_registry.get_all_tools() if not t.is_available
     }
@@ -147,6 +147,12 @@ def test_get_tools_by_category_pdf_contains_remove_pages():
     assert ids == {"remove_pages"}
 
 
+def test_get_tools_by_category_security_contains_protect_and_unlock():
+    security_tools = tool_registry.get_tools_by_category("security")
+    ids = {t.id for t in security_tools}
+    assert ids == {"protect", "unlock"}
+
+
 def test_get_tools_by_category_unknown_category_returns_empty():
     assert tool_registry.get_tools_by_category("nonexistent_category") == []
 
@@ -218,3 +224,18 @@ def test_rotate_tool_specifically_registered():
     # above). test_get_tools_by_category (unchanged from before
     # Phase 17) already locks this in.
     assert tool.category == "organize"
+
+
+def test_protect_tool_specifically_registered():
+    tool = tool_registry.get_tool("protect")
+    assert tool is not None
+    assert tool.name == "Protect PDF"
+    assert tool.description == "Add a password to a PDF to restrict access."
+    assert tool.status == STATUS_AVAILABLE
+    assert tool.is_available
+    # Category and id both left unchanged from their pre-existing
+    # values -- Phase 18 only flips status from coming_soon to
+    # available (see the equivalent notes on Extract/Organize/Rotate
+    # above). test_get_tools_by_category_security_contains_protect_and_
+    # unlock (unchanged from before Phase 18) already locks this in.
+    assert tool.category == "security"

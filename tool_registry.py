@@ -118,7 +118,7 @@ PROTECT = Tool(
     id="protect",
     name="Protect PDF",
     description="Add a password to a PDF to restrict access.",
-    status=STATUS_COMING_SOON,
+    status=STATUS_AVAILABLE,
     category="security",
 )
 

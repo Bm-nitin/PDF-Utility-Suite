@@ -75,6 +75,7 @@ import file_manager
 import models
 import organize_engine
 import pdf_engine
+import protect_engine
 import remove_pages_engine
 import rotate_engine
 import split_engine
@@ -316,6 +317,27 @@ class MainWindow:
         self._rotate_queue: "queue.Queue[dict]" = queue.Queue()
         self.rotate_in_progress = False
 
+        # Phase 18: Protect PDF's own state, deliberately separate from
+        # every other tool's -- single source + password/confirm-
+        # password StringVars (never written anywhere but into the
+        # worker call itself -- see _on_protect_execute_clicked() and
+        # the "Password lifetime" notes throughout this section) plus a
+        # show/hide toggle and the three permission checkboxes described
+        # in protect_engine.py's own module docstring.
+        self.protect_source: Optional[models.PDFFile] = None
+        self.protect_password_var = tk.StringVar(value="")
+        self.protect_confirm_var = tk.StringVar(value="")
+        self.protect_show_password_var = tk.BooleanVar(value=False)
+        self.protect_allow_printing_var = tk.BooleanVar(value=True)
+        self.protect_allow_copying_var = tk.BooleanVar(value=True)
+        self.protect_allow_modifying_var = tk.BooleanVar(value=True)
+        self.protect_status_var = tk.StringVar(value="Status: Ready")
+
+        self._protect_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._protect_import_in_progress = False
+        self._protect_queue: "queue.Queue[dict]" = queue.Queue()
+        self.protect_in_progress = False
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -405,6 +427,17 @@ class MainWindow:
             font=("Segoe UI", 10),
         )
 
+        # Phase 18: first tool needing a checkbox (Protect PDF's
+        # optional permission toggles) -- styled to match
+        # Compression.TRadiobutton's card-background/body-font look
+        # rather than inventing a visually distinct control family.
+        style.configure(
+            "Card.TCheckbutton",
+            background=COLOR_CARD,
+            foreground=COLOR_TEXT_PRIMARY,
+            font=("Segoe UI", 10),
+        )
+
         style.configure(
             "Card.TFrame",
             background=COLOR_CARD,
@@ -470,6 +503,7 @@ class MainWindow:
         self._build_extract_workspace(self.workspace_container)
         self._build_organize_workspace(self.workspace_container)
         self._build_rotate_workspace(self.workspace_container)
+        self._build_protect_workspace(self.workspace_container)
 
         self._select_tool(self.current_tool_id)
 
@@ -1884,6 +1918,277 @@ class MainWindow:
                 )
             )
 
+    def _build_protect_workspace(self, parent: tk.Widget) -> None:
+        """Phase 18: the Protect PDF tool's dedicated workspace.
+
+        Follows the same overall shape as every other single-source
+        tool workspace (own state, own view frame, same card/status/
+        progress styling), with a Password card in place of a page-
+        selection card: two masked (show="*") entries -- password and
+        confirm-password -- a show/hide toggle, and the three optional
+        permission checkboxes protect_engine.py's own module docstring
+        documents (printing/copying/modifying; the rest are always
+        granted). See _update_protect_feedback() below for the password-
+        never-echoed live validation, and every _on_protect_* handler's
+        own docstring for exactly how long password data is kept in
+        memory.
+        """
+        self.protect_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.protect_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="PROTECT PDF", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Add a password to a PDF and save as a new file -- locally, no upload.",
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Source file card
+        source_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        source_card.pack(fill="x", pady=(0, 16))
+        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner.pack(fill="x", padx=18, pady=16)
+
+        self.protect_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_protect_select_file_clicked,
+        )
+        self.protect_select_btn.pack(side="left")
+
+        self.protect_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.protect_source_label.pack(side="left", padx=(16, 0))
+
+        # Password card
+        password_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        password_card.pack(fill="x", pady=(0, 16))
+        password_inner = tk.Frame(password_card, bg=COLOR_CARD)
+        password_inner.pack(fill="x", padx=18, pady=14)
+
+        tk.Label(
+            password_inner, text="Set Password",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        password_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        password_row.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            password_row, text="Password:", width=14, anchor="w",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left")
+        self.protect_password_entry = ttk.Entry(
+            password_row, textvariable=self.protect_password_var,
+            show="*", width=28,
+        )
+        self.protect_password_entry.pack(side="left")
+
+        confirm_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        confirm_row.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            confirm_row, text="Confirm password:", width=14, anchor="w",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left")
+        self.protect_confirm_entry = ttk.Entry(
+            confirm_row, textvariable=self.protect_confirm_var,
+            show="*", width=28,
+        )
+        self.protect_confirm_entry.pack(side="left")
+
+        show_password_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        show_password_row.pack(fill="x", pady=(2, 10))
+        self.protect_show_password_check = ttk.Checkbutton(
+            show_password_row, text="Show password",
+            variable=self.protect_show_password_var,
+            style="Card.TCheckbutton",
+            command=self._on_protect_show_password_toggled,
+        )
+        self.protect_show_password_check.pack(side="left")
+        self.protect_clear_btn = ttk.Button(
+            show_password_row, text="Clear Password", style="Secondary.TButton",
+            command=self._on_protect_clear_clicked,
+        )
+        self.protect_clear_btn.pack(side="left", padx=(16, 0))
+
+        # Optional permissions -- see protect_engine.py's module
+        # docstring ("PERMISSIONS" section) for exactly which flags
+        # these map to and why only these three are exposed. All three
+        # default to checked (allowed), matching
+        # protect_engine.DEFAULT_PERMISSIONS.
+        tk.Label(
+            password_inner, text="Allow, once opened with the password:",
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(0, 4))
+        permissions_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        permissions_row.pack(fill="x", pady=(0, 10))
+        self.protect_allow_printing_check = ttk.Checkbutton(
+            permissions_row, text="Printing",
+            variable=self.protect_allow_printing_var,
+            style="Card.TCheckbutton",
+        )
+        self.protect_allow_printing_check.pack(side="left")
+        self.protect_allow_copying_check = ttk.Checkbutton(
+            permissions_row, text="Copying / extraction",
+            variable=self.protect_allow_copying_var,
+            style="Card.TCheckbutton",
+        )
+        self.protect_allow_copying_check.pack(side="left", padx=(16, 0))
+        self.protect_allow_modifying_check = ttk.Checkbutton(
+            permissions_row, text="Modifying",
+            variable=self.protect_allow_modifying_var,
+            style="Card.TCheckbutton",
+        )
+        self.protect_allow_modifying_check.pack(side="left", padx=(16, 0))
+
+        # Live preview/summary -- driven entirely by
+        # protect_engine.validate_password() (pure validation, no PDF
+        # write, and its messages are always fixed strings that never
+        # contain the password itself -- see that function's docstring)
+        # via the StringVar traces below. NEVER displays password
+        # contents.
+        self.protect_feedback_var = tk.StringVar(value="")
+        self.protect_feedback_label = tk.Label(
+            password_inner, textvariable=self.protect_feedback_var,
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            justify="left", anchor="w",
+        )
+        self.protect_feedback_label.pack(fill="x")
+
+        self.protect_error_var = tk.StringVar(value="")
+        self.protect_error_label = tk.Label(
+            password_inner, textvariable=self.protect_error_var,
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            justify="left", anchor="w", wraplength=520,
+        )
+        self.protect_error_label.pack(fill="x", pady=(4, 0))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.protect_button = ttk.Button(
+            action_wrapper, text="PROTECT PDF", style="Primary.TButton",
+            command=self._on_protect_execute_clicked, state="disabled",
+        )
+        self.protect_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.protect_status_label = tk.Label(
+            status_frame, textvariable=self.protect_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.protect_status_label.pack(fill="x", pady=(0, 6))
+        self.protect_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.protect_progress_bar.pack(fill="x")
+
+        self.protect_password_var.trace_add(
+            "write", self._on_protect_password_changed
+        )
+        self.protect_confirm_var.trace_add(
+            "write", self._on_protect_password_changed
+        )
+        self._update_protect_feedback()
+
+    def _on_protect_password_changed(self, *_args) -> None:
+        self._update_protect_feedback()
+
+    def _on_protect_show_password_toggled(self) -> None:
+        show_char = "" if self.protect_show_password_var.get() else "*"
+        self.protect_password_entry.configure(show=show_char)
+        self.protect_confirm_entry.configure(show=show_char)
+
+    def _update_protect_feedback(self) -> None:
+        """The single place that keeps the password-readiness preview,
+        the validation error message, and the PROTECT PDF button's
+        enabled state all in sync with the current password/confirm-
+        password text -- driven purely by protect_engine.
+        validate_password() (pure validation, no PDF write, and its
+        exceptions are always fixed, generic strings -- see that
+        function's docstring), so bad input is caught instantly and can
+        never crash the UI. NEVER reads password characters into any
+        label, error message, or log -- only ever describes readiness
+        in the abstract ("password required", "passwords do not
+        match", "ready to protect").
+        """
+        password = self.protect_password_var.get()
+        confirm = self.protect_confirm_var.get()
+        self.protect_error_var.set("")
+
+        if self.protect_source is None:
+            self.protect_feedback_var.set("Select a PDF file first.")
+            self.protect_button.configure(state="disabled")
+            return
+
+        try:
+            protect_engine.validate_password(password)
+        except protect_engine.PasswordError as exc:
+            self.protect_error_var.set(str(exc))
+            self.protect_feedback_var.set("Password required.")
+            self.protect_button.configure(state="disabled")
+            return
+
+        if not confirm:
+            self.protect_feedback_var.set("Confirm your password.")
+            self.protect_button.configure(state="disabled")
+            return
+
+        if password != confirm:
+            self.protect_error_var.set("Passwords do not match.")
+            self.protect_feedback_var.set("Passwords do not match.")
+            self.protect_button.configure(state="disabled")
+            return
+
+        self.protect_feedback_var.set("Ready to protect.")
+        self.protect_button.configure(
+            state="disabled" if self._any_operation_in_progress() else "normal"
+        )
+
+    def _update_protect_controls_state(self) -> None:
+        """The single place that restores Protect PDF's own controls to
+        their correct enabled state once no operation is running --
+        mirrors _update_rotate_controls_state()'s role for its own
+        tool.
+        """
+        self.protect_select_btn.configure(state="normal")
+        self.protect_password_entry.configure(state="normal")
+        self.protect_confirm_entry.configure(state="normal")
+        self.protect_show_password_check.configure(state="normal")
+        self.protect_clear_btn.configure(state="normal")
+        self.protect_allow_printing_check.configure(state="normal")
+        self.protect_allow_copying_check.configure(state="normal")
+        self.protect_allow_modifying_check.configure(state="normal")
+        self._update_protect_feedback()
+
+    def _update_protect_source_label(self) -> None:
+        if self.protect_source is None:
+            self.protect_source_label.configure(text="No file selected.")
+        else:
+            self.protect_source_label.configure(
+                text=(
+                    f"{self.protect_source.name}  \u2014  "
+                    f"{self.protect_source.page_count_display}, "
+                    f"{self.protect_source.size_display}"
+                )
+            )
+
     def _select_tool(self, tool_id: str) -> None:
         """Switches the workspace to show the given tool. Unknown tool
         ids are a safe no-op -- selecting a tool that doesn't exist
@@ -1901,6 +2206,7 @@ class MainWindow:
         self.extract_view.pack_forget()
         self.organize_view.pack_forget()
         self.rotate_view.pack_forget()
+        self.protect_view.pack_forget()
         self.coming_soon_view.pack_forget()
 
         if tool_id == "merge_compress":
@@ -1915,6 +2221,8 @@ class MainWindow:
             self.organize_view.pack(fill="both", expand=True, padx=28, pady=24)
         elif tool_id == "rotate":
             self.rotate_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "protect":
+            self.protect_view.pack(fill="both", expand=True, padx=28, pady=24)
         else:
             # Covers every coming_soon tool, and defensively covers a
             # future "available" tool that doesn't have its own
@@ -2222,15 +2530,16 @@ class MainWindow:
         buttons, per-row file-list controls, Clear All, Split PDF's own
         controls, Remove Pages' own controls -- Phase 14, Extract
         Pages' own controls -- Phase 15, Organize Pages' own controls
-        -- Phase 16, and Rotate Pages' own controls -- Phase 17) agrees
-        on for "is anything running right now" -- the Phase 9 "one
-        consistent operation-state mechanism" requirement, now covering
-        all six tool workspaces. Every tool is treated as mutually
-        exclusive with every other tool too (not just within itself):
-        only one background PDF operation runs at a time app-wide,
-        which is the simplest, safest policy and avoids two threads
-        touching PyMuPDF concurrently (see the Phase 5 delivery notes
-        on multi-threaded PyMuPDF fragility).
+        -- Phase 16, Rotate Pages' own controls -- Phase 17, and
+        Protect PDF's own controls -- Phase 18) agrees on for "is
+        anything running right now" -- the Phase 9 "one consistent
+        operation-state mechanism" requirement, now covering all seven
+        tool workspaces. Every tool is treated as mutually exclusive
+        with every other tool too (not just within itself): only one
+        background PDF operation runs at a time app-wide, which is the
+        simplest, safest policy and avoids two threads touching PyMuPDF
+        concurrently (see the Phase 5 delivery notes on multi-threaded
+        PyMuPDF fragility).
         """
         return (
             self._import_in_progress
@@ -2247,6 +2556,8 @@ class MainWindow:
             or self.organize_in_progress
             or self._rotate_import_in_progress
             or self.rotate_in_progress
+            or self._protect_import_in_progress
+            or self.protect_in_progress
         )
 
     def _assert_main_thread(self) -> None:
@@ -2385,6 +2696,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
         self.status_var.set(f"Status: {self._summarize_import(added, skipped_duplicates, errors)}")
 
@@ -2636,6 +2948,17 @@ class MainWindow:
         for radio in self.rotate_angle_radios.values():
             radio.configure(state=state)
 
+        # Phase 18: Protect PDF's own controls follow the same busy
+        # flag too, for the same reason every other tool's do.
+        self.protect_select_btn.configure(state=state)
+        self.protect_password_entry.configure(state=state)
+        self.protect_confirm_entry.configure(state=state)
+        self.protect_show_password_check.configure(state=state)
+        self.protect_clear_btn.configure(state=state)
+        self.protect_allow_printing_check.configure(state=state)
+        self.protect_allow_copying_check.configure(state=state)
+        self.protect_allow_modifying_check.configure(state=state)
+
         if enabled:
             # Restore the file-count-dependent rules for the three
             # action buttons (a flat "enabled" isn't correct for them).
@@ -2664,6 +2987,10 @@ class MainWindow:
             # "normal" above would otherwise leave it enabled even for
             # an empty/invalid selection or no source selected.
             self._update_rotate_controls_state()
+            # Same re-evaluation for PROTECT PDF -- the blanket "normal"
+            # above would otherwise leave it enabled even for an empty/
+            # mismatched password or no source selected.
+            self._update_protect_controls_state()
         else:
             # Re-render immediately so per-row Remove/Move Up/Move Down
             # become disabled the instant an operation starts (they read
@@ -2674,6 +3001,7 @@ class MainWindow:
             self.extract_button.configure(state="disabled")
             self.organize_button.configure(state="disabled")
             self.rotate_button.configure(state="disabled")
+            self.protect_button.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # File list mutation (Phase 5: remove / reorder / clear)
@@ -2885,6 +3213,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -3105,6 +3434,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -3144,6 +3474,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
         succeeded: List[dict] = result["succeeded"]
         failed: List[Tuple[str, str]] = result["failed"]
@@ -3301,6 +3632,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
         if item["success"]:
             result: dict = item["result"]
@@ -3418,6 +3750,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     # ------------------------------------------------------------------
     # Split PDF: the actual split operation (Phase 13)
@@ -3579,6 +3912,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     # ------------------------------------------------------------------
     # Remove Pages: source file import (Phase 14)
@@ -3666,6 +4000,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     def _on_remove_pages_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -3823,6 +4158,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     # ------------------------------------------------------------------
     # Extract Pages: source file import (Phase 15)
@@ -3911,6 +4247,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     def _on_extract_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -4069,6 +4406,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: source file import (Phase 16)
@@ -4163,6 +4501,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: the actual reorder operation (Phase 16)
@@ -4310,6 +4649,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     # ------------------------------------------------------------------
     # Rotate Pages: source file import (Phase 17)
@@ -4404,6 +4744,7 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
     def _on_rotate_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -4566,6 +4907,314 @@ class MainWindow:
         self._update_extract_controls_state()
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+
+    # ------------------------------------------------------------------
+    # Protect PDF: source file import (Phase 18)
+    # ------------------------------------------------------------------
+
+    def _on_protect_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.protect_status_var.set("Status: Ready")
+            return
+
+        self._start_protect_import(path)
+
+    def _start_protect_import(self, path: Path) -> None:
+        self._protect_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.protect_status_var.set("Status: Validating file...")
+        self.protect_progress_bar.configure(mode="indeterminate")
+        self.protect_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._protect_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_protect_import_queue)
+
+    def _protect_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls pdf_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly. No password
+        is involved at the import stage at all.
+        """
+        try:
+            info = pdf_engine.get_pdf_info(path)
+            self._protect_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._protect_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._protect_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_protect_import_queue(self) -> None:
+        try:
+            result = self._protect_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_protect_import_queue)
+            return
+        self._apply_protect_import_result(result)
+
+    def _apply_protect_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.protect_progress_bar.stop()
+        self.protect_progress_bar.configure(mode="determinate", value=0)
+        self._protect_import_in_progress = False
+
+        if result["success"]:
+            self.protect_source = models.PDFFile(**result["info"])
+            self._update_protect_source_label()
+            self.protect_status_var.set(
+                f"Status: Selected '{self.protect_source.name}'."
+            )
+        else:
+            self.protect_source = None
+            self._update_protect_source_label()
+            self.protect_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Protect PDF's import shares the same app-wide busy lock, so
+        # its completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+
+    def _on_protect_clear_clicked(self) -> None:
+        """Resets password/confirm-password (and the permission
+        checkboxes back to their default-allowed state) but keeps the
+        selected source PDF -- mirrors every other tool's own Clear
+        Selection/Reset behavior: the user most likely wants to retype
+        a password against the same file, not re-pick the file too.
+        Setting the StringVars fires the traces in
+        _build_protect_workspace(), which refresh the preview/error/
+        button state automatically. This is also how password data is
+        actively scrubbed from the UI (see the Phase 18 "password
+        lifetime" notes throughout this section) any time the user
+        explicitly asks to start over, not only after a completed
+        operation.
+        """
+        if self._any_operation_in_progress():
+            return
+        self.protect_password_var.set("")
+        self.protect_confirm_var.set("")
+        self.protect_allow_printing_var.set(True)
+        self.protect_allow_copying_var.set(True)
+        self.protect_allow_modifying_var.set(True)
+
+    # ------------------------------------------------------------------
+    # Protect PDF: the actual protect operation (Phase 18)
+    # ------------------------------------------------------------------
+
+    def _on_protect_execute_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+        if self.protect_source is None:
+            return  # defensive; button should be disabled without a source
+
+        password = self.protect_password_var.get()
+        confirm = self.protect_confirm_var.get()
+
+        try:
+            protect_engine.validate_password(password)
+        except protect_engine.PasswordError as exc:
+            self.protect_error_var.set(str(exc))
+            # Deliberately does not include the password (or anything
+            # derived from it) in this status line -- str(exc) here is
+            # always one of protect_engine.validate_password()'s fixed,
+            # generic messages (see that function's docstring), never
+            # anything containing the password itself.
+            self.protect_status_var.set(f"Status: {exc}")
+            messagebox.showerror(
+                title="Invalid Password", message=str(exc), parent=self.root,
+            )
+            return
+
+        if password != confirm:
+            message = "Passwords do not match."
+            self.protect_error_var.set(message)
+            self.protect_status_var.set(f"Status: {message}")
+            messagebox.showerror(
+                title="Passwords Do Not Match", message=message, parent=self.root,
+            )
+            return
+
+        permissions = protect_engine.build_permissions(
+            allow_printing=self.protect_allow_printing_var.get(),
+            allow_copying=self.protect_allow_copying_var.get(),
+            allow_modifying=self.protect_allow_modifying_var.get(),
+        )
+
+        # Sensible, project-consistent default filename for the native
+        # Save As dialog -- reusing file_manager's existing sanitization/
+        # extension helpers rather than inventing a second naming
+        # mechanism, exactly like every other tool does. Never derived
+        # from the password.
+        default_name = file_manager.ensure_pdf_extension(
+            file_manager.sanitize_windows_filename(
+                f"{self.protect_source.path.stem}_protected"
+            )
+        )
+        output_path = file_manager.save_pdf_file(
+            parent=self.root,
+            default_name=default_name,
+            title="Save Protected PDF As",
+        )
+        if output_path is None:
+            self.protect_status_var.set("Status: Ready")
+            return
+
+        # The password is read from the StringVars exactly once, right
+        # here, and passed directly into the worker thread's argument
+        # tuple below -- it is not copied into any other attribute,
+        # queue message, log call, or exception anywhere in this
+        # method. _start_protect() and _protect_worker() below continue
+        # that same discipline; see their own docstrings.
+        self._start_protect(
+            self.protect_source.path, password, permissions, output_path,
+        )
+
+    def _start_protect(
+        self, source_path: Path, password: str, permissions: int,
+        output_path: Path,
+    ) -> None:
+        self.protect_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.protect_status_var.set("Status: Protecting PDF...")
+        self.protect_progress_bar.configure(mode="indeterminate")
+        self.protect_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._protect_worker,
+            args=(source_path, password, permissions, output_path),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_protect_queue)
+
+    def _protect_worker(
+        self, source_path: Path, password: str, permissions: int,
+        output_path: Path,
+    ) -> None:
+        """Runs on a background thread. Calls
+        protect_engine.protect_pdf() directly, passing `password`
+        straight through as a plain function argument. Must not touch
+        any tkinter widget; only the thread-safe queue is used to
+        report back -- and, per the Phase 18 "password lifetime"
+        requirements, the queue messages below never include the
+        password itself, only a success flag, the resulting path, or a
+        (password-free) error string. `password` is not copied into any
+        wider scope here; it goes out of scope with this function call
+        once protect_engine.protect_pdf() returns.
+        """
+        def report(message: str) -> None:
+            self._protect_queue.put({"type": "progress", "message": message})
+
+        try:
+            result_path = protect_engine.protect_pdf(
+                source_path, output_path, password,
+                permissions=permissions, progress_callback=report,
+            )
+            self._protect_queue.put({
+                "type": "done", "success": True,
+                "output_path": result_path, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            # str(exc) here is safe to put on the queue: every
+            # PDFEngineError protect_engine.py raises is built from a
+            # fixed message or from library/filesystem error text, never
+            # from `password` -- see protect_engine.py's own docstrings
+            # for exactly where each exception's text comes from.
+            self._protect_queue.put({
+                "type": "done", "success": False,
+                "output_path": None, "error": str(exc),
+            })
+        except Exception:
+            self._protect_queue.put({
+                "type": "done", "success": False, "output_path": None,
+                "error": "An unexpected error occurred while protecting the PDF.",
+            })
+
+    def _poll_protect_queue(self) -> None:
+        try:
+            while True:
+                item = self._protect_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.protect_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_protect_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_protect_queue)
+
+    def _apply_protect_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.protect_progress_bar.stop()
+        self.protect_progress_bar.configure(mode="determinate", value=0)
+
+        self.protect_in_progress = False
+
+        if item["success"]:
+            output_path = item["output_path"]
+            self.protect_status_var.set(
+                f"Status: PDF protected successfully. Saved to "
+                f"'{output_path.name}'."
+            )
+            # A completed protection has fully consumed its source,
+            # mirroring every other tool's own post-completion behavior:
+            # clear it so the workspace returns to its non-file-selected
+            # initial state. The password/confirm StringVars are ALSO
+            # always cleared here -- on success AND on failure below --
+            # per the Phase 18 "password lifetime" requirements: this is
+            # the point where the password this UI was holding has
+            # finished being used for anything, successful or not, so
+            # there is no remaining reason to keep it in the Tk
+            # variables (or, transitively, in Tk's own widget/entry
+            # state) a moment longer than necessary. Must happen before
+            # _update_protect_controls_state() below so PROTECT PDF
+            # correctly goes back to "disabled" (it depends on
+            # self.protect_source).
+            self.protect_source = None
+            self._update_protect_source_label()
+        else:
+            self.protect_status_var.set("Status: Protect PDF failed.")
+            messagebox.showerror(
+                title="Protect PDF Failed", message=item["error"], parent=self.root,
+            )
+
+        self.protect_password_var.set("")
+        self.protect_confirm_var.set("")
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Protect PDF shares the same app-wide busy lock, so its
+        # completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
 
 
 def run() -> None:
