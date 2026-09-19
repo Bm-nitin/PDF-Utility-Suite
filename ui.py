@@ -80,6 +80,7 @@ import remove_pages_engine
 import rotate_engine
 import split_engine
 import tool_registry
+import unlock_engine
 from config import APP_NAME, APP_VERSION
 
 # ---------------------------------------------------------------------------
@@ -338,6 +339,30 @@ class MainWindow:
         self._protect_queue: "queue.Queue[dict]" = queue.Queue()
         self.protect_in_progress = False
 
+        # Phase 19: Unlock PDF's own state, deliberately separate from
+        # every other tool's -- single source (which, unlike every
+        # other tool, is EXPECTED to be encrypted -- see
+        # unlock_engine.get_source_info()) + a single password
+        # StringVar, following the exact same password-lifetime
+        # discipline Protect PDF established in Phase 18 (never written
+        # anywhere but into the worker call itself -- see
+        # _on_unlock_execute_clicked()) plus its own show/hide toggle.
+        # Unlike every other single-source tool, Unlock has no output
+        # Save As dialog at all -- see _on_unlock_execute_clicked()'s
+        # docstring and file_manager.generate_unlocked_output_path()'s
+        # own docstring for why -- so there is no output-path state to
+        # track here either; the resulting path is shown directly in
+        # self.unlock_status_var once the operation completes.
+        self.unlock_source: Optional[models.PDFFile] = None
+        self.unlock_password_var = tk.StringVar(value="")
+        self.unlock_show_password_var = tk.BooleanVar(value=False)
+        self.unlock_status_var = tk.StringVar(value="Status: Ready")
+
+        self._unlock_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._unlock_import_in_progress = False
+        self._unlock_queue: "queue.Queue[dict]" = queue.Queue()
+        self.unlock_in_progress = False
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -504,6 +529,7 @@ class MainWindow:
         self._build_organize_workspace(self.workspace_container)
         self._build_rotate_workspace(self.workspace_container)
         self._build_protect_workspace(self.workspace_container)
+        self._build_unlock_workspace(self.workspace_container)
 
         self._select_tool(self.current_tool_id)
 
@@ -2189,6 +2215,233 @@ class MainWindow:
                 )
             )
 
+    def _build_unlock_workspace(self, parent: tk.Widget) -> None:
+        """Phase 19: the Unlock PDF tool's dedicated workspace.
+
+        Follows the same overall shape as _build_protect_workspace()
+        (own state, own view frame, same card/status/progress styling,
+        the same password-never-echoed live-validation discipline), but
+        simpler: one password field (no confirmation -- there is
+        nothing to confirm when unlocking, unlike setting a new
+        password), no permission checkboxes (removing protection has no
+        permissions to choose), and -- see
+        _on_unlock_execute_clicked()'s own docstring -- no Save As
+        dialog at all, since the output path is fully automatic and
+        collision-safe (file_manager.generate_unlocked_output_path()).
+
+        Also unlike every other single-source tool, the source here is
+        EXPECTED to be encrypted -- see unlock_engine.get_source_info(),
+        which (unlike pdf_engine.get_pdf_info()) does not reject one --
+        and _update_unlock_feedback() below shows a clear, first-class
+        message rather than silently proceeding if the selected file
+        turns out not to be password-protected at all.
+        """
+        self.unlock_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.unlock_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="UNLOCK PDF", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Create an unlocked copy of a password-protected PDF -- locally, no upload.",
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Source file card
+        source_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        source_card.pack(fill="x", pady=(0, 16))
+        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner.pack(fill="x", padx=18, pady=16)
+
+        self.unlock_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_unlock_select_file_clicked,
+        )
+        self.unlock_select_btn.pack(side="left")
+
+        self.unlock_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.unlock_source_label.pack(side="left", padx=(16, 0))
+
+        # Password card
+        password_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        password_card.pack(fill="x", pady=(0, 16))
+        password_inner = tk.Frame(password_card, bg=COLOR_CARD)
+        password_inner.pack(fill="x", padx=18, pady=14)
+
+        tk.Label(
+            password_inner, text="Password",
+            font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        password_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        password_row.pack(fill="x", pady=(0, 6))
+        tk.Label(
+            password_row, text="Password:", width=14, anchor="w",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left")
+        self.unlock_password_entry = ttk.Entry(
+            password_row, textvariable=self.unlock_password_var,
+            show="*", width=28,
+        )
+        self.unlock_password_entry.pack(side="left")
+
+        show_password_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        show_password_row.pack(fill="x", pady=(2, 10))
+        self.unlock_show_password_check = ttk.Checkbutton(
+            show_password_row, text="Show password",
+            variable=self.unlock_show_password_var,
+            style="Card.TCheckbutton",
+            command=self._on_unlock_show_password_toggled,
+        )
+        self.unlock_show_password_check.pack(side="left")
+        self.unlock_clear_btn = ttk.Button(
+            show_password_row, text="Clear Password", style="Secondary.TButton",
+            command=self._on_unlock_clear_clicked,
+        )
+        self.unlock_clear_btn.pack(side="left", padx=(16, 0))
+
+        # Live preview/summary -- driven purely by whether a source is
+        # selected, whether it's actually encrypted (per
+        # unlock_engine.is_source_encrypted()), and whether a non-empty
+        # password has been typed. NEVER reads password characters into
+        # any label, error message, or log -- same discipline as
+        # Protect PDF's own _update_protect_feedback().
+        self.unlock_feedback_var = tk.StringVar(value="")
+        self.unlock_feedback_label = tk.Label(
+            password_inner, textvariable=self.unlock_feedback_var,
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            justify="left", anchor="w",
+        )
+        self.unlock_feedback_label.pack(fill="x")
+
+        self.unlock_error_var = tk.StringVar(value="")
+        self.unlock_error_label = tk.Label(
+            password_inner, textvariable=self.unlock_error_var,
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            justify="left", anchor="w", wraplength=520,
+        )
+        self.unlock_error_label.pack(fill="x", pady=(4, 0))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.unlock_button = ttk.Button(
+            action_wrapper, text="UNLOCK PDF", style="Primary.TButton",
+            command=self._on_unlock_execute_clicked, state="disabled",
+        )
+        self.unlock_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.unlock_status_label = tk.Label(
+            status_frame, textvariable=self.unlock_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.unlock_status_label.pack(fill="x", pady=(0, 6))
+        self.unlock_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.unlock_progress_bar.pack(fill="x")
+
+        self.unlock_password_var.trace_add(
+            "write", self._on_unlock_password_changed
+        )
+        self._update_unlock_feedback()
+
+    def _on_unlock_password_changed(self, *_args) -> None:
+        self._update_unlock_feedback()
+
+    def _on_unlock_show_password_toggled(self) -> None:
+        show_char = "" if self.unlock_show_password_var.get() else "*"
+        self.unlock_password_entry.configure(show=show_char)
+
+    def _update_unlock_feedback(self) -> None:
+        """The single place that keeps the readiness preview, the
+        validation error message, and the UNLOCK PDF button's enabled
+        state all in sync with the current source and password text.
+        NEVER reads password characters into any label, error message,
+        or log -- same discipline as Protect PDF's own
+        _update_protect_feedback().
+
+        Unlike every other tool's own feedback method, this one has an
+        extra first-class branch: a selected source that turns out not
+        to be encrypted at all (per self.unlock_source.is_encrypted,
+        populated from unlock_engine.get_source_info() at import time)
+        shows a clear, unambiguous message and disables the button --
+        per the Phase 19 spec, this is never silently treated as
+        "nothing to do, just proceed".
+        """
+        password = self.unlock_password_var.get()
+        self.unlock_error_var.set("")
+
+        if self.unlock_source is None:
+            self.unlock_feedback_var.set("Select a PDF file first.")
+            self.unlock_button.configure(state="disabled")
+            return
+
+        if not self.unlock_source.is_encrypted:
+            self.unlock_feedback_var.set(
+                "This PDF is not password protected."
+            )
+            self.unlock_button.configure(state="disabled")
+            return
+
+        if not password or not password.strip():
+            self.unlock_feedback_var.set("Enter the password.")
+            self.unlock_button.configure(state="disabled")
+            return
+
+        self.unlock_feedback_var.set("Ready to unlock.")
+        self.unlock_button.configure(
+            state="disabled" if self._any_operation_in_progress() else "normal"
+        )
+
+    def _update_unlock_controls_state(self) -> None:
+        """The single place that restores Unlock PDF's own controls to
+        their correct enabled state once no operation is running --
+        mirrors _update_protect_controls_state()'s role for its own
+        tool.
+        """
+        self.unlock_select_btn.configure(state="normal")
+        self.unlock_password_entry.configure(state="normal")
+        self.unlock_show_password_check.configure(state="normal")
+        self.unlock_clear_btn.configure(state="normal")
+        self._update_unlock_feedback()
+
+    def _update_unlock_source_label(self) -> None:
+        if self.unlock_source is None:
+            self.unlock_source_label.configure(text="No file selected.")
+        else:
+            protection_note = (
+                "Password protected" if self.unlock_source.is_encrypted
+                else "Not password protected"
+            )
+            self.unlock_source_label.configure(
+                text=(
+                    f"{self.unlock_source.name}  \u2014  "
+                    f"{self.unlock_source.page_count_display}, "
+                    f"{self.unlock_source.size_display}  \u2014  "
+                    f"{protection_note}"
+                )
+            )
+
     def _select_tool(self, tool_id: str) -> None:
         """Switches the workspace to show the given tool. Unknown tool
         ids are a safe no-op -- selecting a tool that doesn't exist
@@ -2207,6 +2460,7 @@ class MainWindow:
         self.organize_view.pack_forget()
         self.rotate_view.pack_forget()
         self.protect_view.pack_forget()
+        self.unlock_view.pack_forget()
         self.coming_soon_view.pack_forget()
 
         if tool_id == "merge_compress":
@@ -2223,6 +2477,8 @@ class MainWindow:
             self.rotate_view.pack(fill="both", expand=True, padx=28, pady=24)
         elif tool_id == "protect":
             self.protect_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "unlock":
+            self.unlock_view.pack(fill="both", expand=True, padx=28, pady=24)
         else:
             # Covers every coming_soon tool, and defensively covers a
             # future "available" tool that doesn't have its own
@@ -2530,16 +2786,16 @@ class MainWindow:
         buttons, per-row file-list controls, Clear All, Split PDF's own
         controls, Remove Pages' own controls -- Phase 14, Extract
         Pages' own controls -- Phase 15, Organize Pages' own controls
-        -- Phase 16, Rotate Pages' own controls -- Phase 17, and
-        Protect PDF's own controls -- Phase 18) agrees on for "is
-        anything running right now" -- the Phase 9 "one consistent
-        operation-state mechanism" requirement, now covering all seven
-        tool workspaces. Every tool is treated as mutually exclusive
-        with every other tool too (not just within itself): only one
-        background PDF operation runs at a time app-wide, which is the
-        simplest, safest policy and avoids two threads touching PyMuPDF
-        concurrently (see the Phase 5 delivery notes on multi-threaded
-        PyMuPDF fragility).
+        -- Phase 16, Rotate Pages' own controls -- Phase 17, Protect
+        PDF's own controls -- Phase 18, and Unlock PDF's own controls
+        -- Phase 19) agrees on for "is anything running right now" --
+        the Phase 9 "one consistent operation-state mechanism"
+        requirement, now covering all eight tool workspaces. Every tool
+        is treated as mutually exclusive with every other tool too (not
+        just within itself): only one background PDF operation runs at
+        a time app-wide, which is the simplest, safest policy and
+        avoids two threads touching PyMuPDF concurrently (see the
+        Phase 5 delivery notes on multi-threaded PyMuPDF fragility).
         """
         return (
             self._import_in_progress
@@ -2558,6 +2814,8 @@ class MainWindow:
             or self.rotate_in_progress
             or self._protect_import_in_progress
             or self.protect_in_progress
+            or self._unlock_import_in_progress
+            or self.unlock_in_progress
         )
 
     def _assert_main_thread(self) -> None:
@@ -2697,6 +2955,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
         self.status_var.set(f"Status: {self._summarize_import(added, skipped_duplicates, errors)}")
 
@@ -2959,6 +3218,13 @@ class MainWindow:
         self.protect_allow_copying_check.configure(state=state)
         self.protect_allow_modifying_check.configure(state=state)
 
+        # Phase 19: Unlock PDF's own controls follow the same busy flag
+        # too, for the same reason every other tool's do.
+        self.unlock_select_btn.configure(state=state)
+        self.unlock_password_entry.configure(state=state)
+        self.unlock_show_password_check.configure(state=state)
+        self.unlock_clear_btn.configure(state=state)
+
         if enabled:
             # Restore the file-count-dependent rules for the three
             # action buttons (a flat "enabled" isn't correct for them).
@@ -2991,6 +3257,10 @@ class MainWindow:
             # above would otherwise leave it enabled even for an empty/
             # mismatched password or no source selected.
             self._update_protect_controls_state()
+            # Same re-evaluation for UNLOCK PDF -- the blanket "normal"
+            # above would otherwise leave it enabled even for an empty
+            # password, no source selected, or a non-encrypted source.
+            self._update_unlock_controls_state()
         else:
             # Re-render immediately so per-row Remove/Move Up/Move Down
             # become disabled the instant an operation starts (they read
@@ -3002,6 +3272,7 @@ class MainWindow:
             self.organize_button.configure(state="disabled")
             self.rotate_button.configure(state="disabled")
             self.protect_button.configure(state="disabled")
+            self.unlock_button.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # File list mutation (Phase 5: remove / reorder / clear)
@@ -3214,6 +3485,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -3435,6 +3707,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -3475,6 +3748,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
         succeeded: List[dict] = result["succeeded"]
         failed: List[Tuple[str, str]] = result["failed"]
@@ -3633,6 +3907,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
         if item["success"]:
             result: dict = item["result"]
@@ -3751,6 +4026,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     # ------------------------------------------------------------------
     # Split PDF: the actual split operation (Phase 13)
@@ -3913,6 +4189,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     # ------------------------------------------------------------------
     # Remove Pages: source file import (Phase 14)
@@ -4001,6 +4278,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     def _on_remove_pages_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -4159,6 +4437,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     # ------------------------------------------------------------------
     # Extract Pages: source file import (Phase 15)
@@ -4248,6 +4527,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     def _on_extract_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -4407,6 +4687,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: source file import (Phase 16)
@@ -4502,6 +4783,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: the actual reorder operation (Phase 16)
@@ -4650,6 +4932,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     # ------------------------------------------------------------------
     # Rotate Pages: source file import (Phase 17)
@@ -4745,6 +5028,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     def _on_rotate_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -4908,6 +5192,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     # ------------------------------------------------------------------
     # Protect PDF: source file import (Phase 18)
@@ -4997,6 +5282,7 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
     def _on_protect_clear_clicked(self) -> None:
         """Resets password/confirm-password (and the permission
@@ -5215,6 +5501,291 @@ class MainWindow:
         self._update_organize_controls_state()
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
+        self._update_unlock_controls_state()
+
+    # ------------------------------------------------------------------
+    # Unlock PDF: source file import (Phase 19)
+    # ------------------------------------------------------------------
+
+    def _on_unlock_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.unlock_status_var.set("Status: Ready")
+            return
+
+        self._start_unlock_import(path)
+
+    def _start_unlock_import(self, path: Path) -> None:
+        self._unlock_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.unlock_status_var.set("Status: Validating file...")
+        self.unlock_progress_bar.configure(mode="indeterminate")
+        self.unlock_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._unlock_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_unlock_import_queue)
+
+    def _unlock_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls unlock_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly. No password
+        is involved at the import stage at all. Uses
+        unlock_engine.get_source_info() rather than
+        pdf_engine.get_pdf_info(), since (unlike every other tool) the
+        selected file is expected to be encrypted, and get_pdf_info()
+        would reject it outright.
+        """
+        try:
+            info = unlock_engine.get_source_info(path)
+            self._unlock_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._unlock_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._unlock_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_unlock_import_queue(self) -> None:
+        try:
+            result = self._unlock_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_unlock_import_queue)
+            return
+        self._apply_unlock_import_result(result)
+
+    def _apply_unlock_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.unlock_progress_bar.stop()
+        self.unlock_progress_bar.configure(mode="determinate", value=0)
+        self._unlock_import_in_progress = False
+
+        if result["success"]:
+            self.unlock_source = models.PDFFile(**result["info"])
+            self._update_unlock_source_label()
+            if self.unlock_source.is_encrypted:
+                self.unlock_status_var.set(
+                    f"Status: Selected '{self.unlock_source.name}'."
+                )
+            else:
+                # First-class, up-front notice -- the same message
+                # _update_unlock_feedback() shows, so the person sees it
+                # immediately rather than only discovering it after
+                # typing a password and pressing Unlock.
+                self.unlock_status_var.set(
+                    "Status: This PDF is not password protected."
+                )
+        else:
+            self.unlock_source = None
+            self._update_unlock_source_label()
+            self.unlock_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Unlock PDF's import shares the same app-wide busy lock, so its
+        # completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+        self._update_unlock_controls_state()
+
+    def _on_unlock_clear_clicked(self) -> None:
+        """Resets the password field but keeps the selected source PDF
+        -- mirrors Protect PDF's own Clear Password behavior: the user
+        most likely wants to retype a password against the same file,
+        not re-pick the file too. Setting the StringVar fires the trace
+        in _build_unlock_workspace(), which refreshes the preview/error/
+        button state automatically. This is also how password data is
+        actively scrubbed from the UI any time the user explicitly asks
+        to start over, not only after a completed operation (see the
+        Phase 19 "password lifetime" notes throughout this section).
+        """
+        if self._any_operation_in_progress():
+            return
+        self.unlock_password_var.set("")
+
+    # ------------------------------------------------------------------
+    # Unlock PDF: the actual unlock operation (Phase 19)
+    # ------------------------------------------------------------------
+
+    def _on_unlock_execute_clicked(self) -> None:
+        """Unlike every other single-source tool's own *_execute_clicked
+        handler, this one never opens a native Save As dialog: per the
+        Phase 19 spec, Unlock's output path is fully automatic and
+        collision-safe (file_manager.generate_unlocked_output_path(),
+        writing next to the source), not something the user picks. See
+        that function's own docstring for why this tool's UX differs
+        from Remove/Extract/Organize/Rotate/Protect here.
+        """
+        if self._any_operation_in_progress():
+            return
+        if self.unlock_source is None:
+            return  # defensive; button should be disabled without a source
+
+        if not self.unlock_source.is_encrypted:
+            # Defensive; the button should already be disabled for a
+            # non-encrypted source (see _update_unlock_feedback()) --
+            # this guards against a direct programmatic call (as in
+            # tests) rather than something reachable through normal use.
+            return
+
+        password = self.unlock_password_var.get()
+        if not password or not password.strip():
+            message = "Enter the password."
+            self.unlock_error_var.set(message)
+            self.unlock_status_var.set(f"Status: {message}")
+            messagebox.showerror(
+                title="Password Required", message=message, parent=self.root,
+            )
+            return
+
+        output_path = file_manager.generate_unlocked_output_path(
+            self.unlock_source.path, self.unlock_source.path.parent,
+        )
+
+        # The password is read from the StringVar exactly once, right
+        # here, and passed directly into the worker thread's argument
+        # tuple below -- it is not copied into any other attribute,
+        # queue message, log call, or exception anywhere in this
+        # method, following the exact same discipline Protect PDF's own
+        # _on_protect_execute_clicked() established in Phase 18.
+        self._start_unlock(self.unlock_source.path, password, output_path)
+
+    def _start_unlock(
+        self, source_path: Path, password: str, output_path: Path,
+    ) -> None:
+        self.unlock_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.unlock_status_var.set("Status: Unlocking PDF...")
+        self.unlock_progress_bar.configure(mode="indeterminate")
+        self.unlock_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._unlock_worker,
+            args=(source_path, password, output_path),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_unlock_queue)
+
+    def _unlock_worker(
+        self, source_path: Path, password: str, output_path: Path,
+    ) -> None:
+        """Runs on a background thread. Calls
+        unlock_engine.unlock_pdf() directly, passing `password` straight
+        through as a plain function argument. Must not touch any
+        tkinter widget; only the thread-safe queue is used to report
+        back -- and, per the Phase 19 "password lifetime" requirements,
+        the queue messages below never include the password itself,
+        only a success flag, the resulting path, or a (password-free)
+        error string. `password` is not copied into any wider scope
+        here; it goes out of scope with this function call once
+        unlock_engine.unlock_pdf() returns.
+        """
+        def report(message: str) -> None:
+            self._unlock_queue.put({"type": "progress", "message": message})
+
+        try:
+            result_path = unlock_engine.unlock_pdf(
+                source_path, output_path, password, progress_callback=report,
+            )
+            self._unlock_queue.put({
+                "type": "done", "success": True,
+                "output_path": result_path, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            # str(exc) here is safe to put on the queue: every
+            # PDFEngineError unlock_engine.py raises is built from a
+            # fixed message or from library/filesystem error text, never
+            # from `password` -- see unlock_engine.py's own docstrings
+            # for exactly where each exception's text comes from.
+            self._unlock_queue.put({
+                "type": "done", "success": False,
+                "output_path": None, "error": str(exc),
+            })
+        except Exception:
+            self._unlock_queue.put({
+                "type": "done", "success": False, "output_path": None,
+                "error": "An unexpected error occurred while unlocking the PDF.",
+            })
+
+    def _poll_unlock_queue(self) -> None:
+        try:
+            while True:
+                item = self._unlock_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.unlock_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_unlock_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_unlock_queue)
+
+    def _apply_unlock_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.unlock_progress_bar.stop()
+        self.unlock_progress_bar.configure(mode="determinate", value=0)
+
+        self.unlock_in_progress = False
+
+        if item["success"]:
+            output_path = item["output_path"]
+            self.unlock_status_var.set(
+                f"Status: PDF unlocked successfully. Saved to "
+                f"'{output_path.name}'."
+            )
+            # A completed unlock has fully consumed its source,
+            # mirroring every other tool's own post-completion behavior:
+            # clear it so the workspace returns to its non-file-selected
+            # initial state. The password StringVar is ALSO always
+            # cleared here -- on success AND on failure below -- per the
+            # Phase 19 "password lifetime" requirements: this is the
+            # point where the password this UI was holding has finished
+            # being used for anything, successful or not, so there is no
+            # remaining reason to keep it a moment longer. Must happen
+            # before _update_unlock_controls_state() below so UNLOCK PDF
+            # correctly goes back to "disabled" (it depends on
+            # self.unlock_source).
+            self.unlock_source = None
+            self._update_unlock_source_label()
+        else:
+            self.unlock_status_var.set("Status: Unlock PDF failed.")
+            messagebox.showerror(
+                title="Unlock PDF Failed", message=item["error"], parent=self.root,
+            )
+
+        self.unlock_password_var.set("")
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Unlock PDF shares the same app-wide busy lock, so its
+        # completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+        self._update_unlock_controls_state()
 
 
 def run() -> None:

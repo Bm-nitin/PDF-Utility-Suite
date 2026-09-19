@@ -111,12 +111,19 @@ def _atomic_save_pdf(doc: "pymupdf.Document", output_path: Path, **save_kwargs) 
 # Validation / inspection
 # ---------------------------------------------------------------------------
 
-def validate_pdf(path: Path) -> None:
+def validate_pdf(path: Path, allow_encrypted: bool = False) -> None:
     """Raise a PDFEngineError subclass if the file is not usable.
 
     Does not raise on success. This is intentionally strict: it opens the
     document to make sure PyMuPDF can actually parse it, not just that the
     extension is '.pdf'.
+
+    `allow_encrypted`, when True, skips the encrypted-PDF rejection below
+    -- every existing caller (merge, compress, split, remove pages,
+    extract, organize, rotate, protect) leaves this at its default of
+    False and is completely unaffected; Phase 19's Unlock PDF is the one
+    tool whose entire purpose requires accepting an encrypted source, so
+    it is the only caller that passes True (see unlock_engine.py).
     """
     path = Path(path)
 
@@ -137,7 +144,7 @@ def validate_pdf(path: Path) -> None:
         ) from exc
 
     try:
-        if doc.is_encrypted:
+        if doc.is_encrypted and not allow_encrypted:
             # needs_pass is True if a password is actually required to
             # open pages (some "encrypted" PDFs have an empty owner
             # password and are effectively readable).

@@ -126,7 +126,7 @@ UNLOCK = Tool(
     id="unlock",
     name="Unlock PDF",
     description="Remove a known password from a PDF.",
-    status=STATUS_COMING_SOON,
+    status=STATUS_AVAILABLE,
     category="security",
 )
 

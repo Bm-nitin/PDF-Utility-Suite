@@ -315,3 +315,30 @@ def generate_split_output_path(source_path: Path, output_dir: Path, suffix: str)
     stem = sanitize_windows_filename(source_path.stem)
     return _find_collision_free_path(output_dir, f"{stem}{suffix}")
 
+
+def generate_unlocked_output_path(source_path: Path, output_dir: Path) -> Path:
+    """Generate a collision-safe destination path for an unlocked
+    (decrypted) copy of `source_path` (Phase 19), following the exact
+    same naming/collision pattern as generate_compressed_output_path()
+    and generate_split_output_path() above: "<stem>_unlocked.pdf",
+    auto-incrementing with " (1)", " (2)", etc. if that name is already
+    taken. Never returns a path that already exists.
+
+    Unlike Remove Pages/Extract Pages/Organize Pages/Rotate Pages/
+    Protect PDF (which all use save_pdf_file()'s native Save As dialog,
+    since a person actively choosing where a new file goes makes sense
+    for those), Unlock PDF writes its output automatically next to the
+    source, with no Save As dialog -- this is the Phase 19 spec's own
+    explicit design (collision-safe automatic naming, "never overwrite
+    automatically") rather than something invented here. `output_dir`
+    is expected to be `source_path.parent` in normal use (see ui.py's
+    _on_unlock_execute_clicked()), but is accepted as a parameter for
+    the same testability reasons generate_compressed_output_path() and
+    generate_split_output_path() do.
+    """
+    source_path = Path(source_path)
+    output_dir = Path(output_dir)
+
+    stem = sanitize_windows_filename(source_path.stem)
+    return _find_collision_free_path(output_dir, f"{stem}_unlocked")
+
