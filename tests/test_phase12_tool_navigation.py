@@ -69,41 +69,41 @@ def test_nav_sidebar_lists_every_registered_tool(window):
 # ---------------------------------------------------------------------------
 
 def test_selecting_a_coming_soon_tool_shows_placeholder(window):
-    # Uses "page_numbers" rather than "split", "remove_pages",
-    # "extract_pages", "organize_pages", "rotate", "protect", or
-    # "unlock" -- Phase 13 made Split, Phase 14 made Remove Pages,
-    # Phase 15 made Extract Pages, Phase 16 made Organize Pages, Phase
-    # 17 made Rotate, Phase 18 made Protect PDF, and Phase 19 made
-    # Unlock PDF real, available tools with their own dedicated
-    # workspaces, so none of them is a valid example of the generic
-    # coming-soon placeholder anymore.
-    window._select_tool("page_numbers")
-    window.root.update()
-
-    assert window.current_tool_id == "page_numbers"
-    assert not window.merge_compress_view.winfo_ismapped()
-    assert window.coming_soon_view.winfo_ismapped()
-    assert window.coming_soon_title_label.cget("text") == "Add Page Numbers"
-
-    window._select_tool("merge_compress")
-    window.root.update()
-
-
-def test_selecting_a_different_coming_soon_tool_updates_placeholder_text(window):
-    window._select_tool("page_numbers")
-    window.root.update()
-    assert window.coming_soon_title_label.cget("text") == "Add Page Numbers"
-
+    # Uses "watermark" rather than "split", "remove_pages",
+    # "extract_pages", "organize_pages", "rotate", "protect", "unlock",
+    # or "page_numbers" -- Phase 13 made Split, Phase 14 made Remove
+    # Pages, Phase 15 made Extract Pages, Phase 16 made Organize Pages,
+    # Phase 17 made Rotate, Phase 18 made Protect PDF, Phase 19 made
+    # Unlock PDF, and Phase 20 made Add Page Numbers real, available
+    # tools with their own dedicated workspaces, so none of them is a
+    # valid example of the generic coming-soon placeholder anymore.
     window._select_tool("watermark")
     window.root.update()
+
+    assert window.current_tool_id == "watermark"
+    assert not window.merge_compress_view.winfo_ismapped()
+    assert window.coming_soon_view.winfo_ismapped()
     assert window.coming_soon_title_label.cget("text") == "Add Watermark"
 
     window._select_tool("merge_compress")
     window.root.update()
 
 
+def test_selecting_a_different_coming_soon_tool_updates_placeholder_text(window):
+    window._select_tool("watermark")
+    window.root.update()
+    assert window.coming_soon_title_label.cget("text") == "Add Watermark"
+
+    window._select_tool("images_to_pdf")
+    window.root.update()
+    assert window.coming_soon_title_label.cget("text") == "Images \u2192 PDF"
+
+    window._select_tool("merge_compress")
+    window.root.update()
+
+
 def test_selecting_merge_compress_after_a_coming_soon_tool_restores_workspace(window):
-    window._select_tool("page_numbers")
+    window._select_tool("watermark")
     window.root.update()
     assert not window.merge_compress_view.winfo_ismapped()
 
@@ -145,16 +145,16 @@ def test_selecting_unknown_tool_id_is_a_safe_noop(window):
 
 
 def test_selecting_unknown_tool_id_while_on_a_coming_soon_tool_is_a_noop(window):
-    # "page_numbers" rather than "split"/"extract_pages"/
-    # "organize_pages"/"rotate"/"protect"/"unlock" -- see the note in
+    # "watermark" rather than "split"/"extract_pages"/"organize_pages"/
+    # "rotate"/"protect"/"unlock"/"page_numbers" -- see the note in
     # test_selecting_a_coming_soon_tool_shows_placeholder above.
-    window._select_tool("page_numbers")
+    window._select_tool("watermark")
     window.root.update()
 
     window._select_tool("totally_bogus_id")
     window.root.update()
 
-    assert window.current_tool_id == "page_numbers"
+    assert window.current_tool_id == "watermark"
     assert window.coming_soon_view.winfo_ismapped()
 
     window._select_tool("merge_compress")

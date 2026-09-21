@@ -74,6 +74,7 @@ import extract_engine
 import file_manager
 import models
 import organize_engine
+import page_numbers_engine
 import pdf_engine
 import protect_engine
 import remove_pages_engine
@@ -363,6 +364,42 @@ class MainWindow:
         self._unlock_queue: "queue.Queue[dict]" = queue.Queue()
         self.unlock_in_progress = False
 
+        # Phase 20: Add Page Numbers' own state, deliberately separate
+        # from every other tool's -- single source + a live-validated
+        # page-selection text (reusing split_engine.parse_page_ranges()
+        # via page_numbers_engine.resolve_pages_to_number(), exactly
+        # like Remove/Extract/Rotate's own page-selection state), a
+        # mode toggle between "all pages" and "selected pages", and the
+        # four page-number options (start number, position, font size,
+        # margin) page_numbers_engine.py's own module docstring
+        # documents. Like Unlock PDF (Phase 19), this tool has no
+        # output Save As dialog -- see
+        # file_manager.generate_numbered_output_path()'s own docstring
+        # for why -- so there is no output-path state to track here
+        # either; the resulting path is shown directly in
+        # self.page_numbers_status_var once the operation completes.
+        self.page_numbers_source: Optional[models.PDFFile] = None
+        self.page_numbers_all_pages_var = tk.BooleanVar(value=True)
+        self.page_numbers_selection_var = tk.StringVar(value="")
+        self.page_numbers_start_var = tk.StringVar(
+            value=str(page_numbers_engine.DEFAULT_START_NUMBER)
+        )
+        self.page_numbers_position_var = tk.StringVar(
+            value=page_numbers_engine.DEFAULT_POSITION
+        )
+        self.page_numbers_font_size_var = tk.StringVar(
+            value=str(page_numbers_engine.DEFAULT_FONT_SIZE)
+        )
+        self.page_numbers_margin_var = tk.StringVar(
+            value=str(page_numbers_engine.DEFAULT_MARGIN)
+        )
+        self.page_numbers_status_var = tk.StringVar(value="Status: Ready")
+
+        self._page_numbers_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._page_numbers_import_in_progress = False
+        self._page_numbers_queue: "queue.Queue[dict]" = queue.Queue()
+        self.page_numbers_in_progress = False
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -530,6 +567,7 @@ class MainWindow:
         self._build_rotate_workspace(self.workspace_container)
         self._build_protect_workspace(self.workspace_container)
         self._build_unlock_workspace(self.workspace_container)
+        self._build_page_numbers_workspace(self.workspace_container)
 
         self._select_tool(self.current_tool_id)
 
@@ -2442,6 +2480,328 @@ class MainWindow:
                 )
             )
 
+    def _build_page_numbers_workspace(self, parent: tk.Widget) -> None:
+        """Phase 20: the Add Page Numbers tool's dedicated workspace.
+
+        Follows the same overall shape as every other single-source
+        tool (own state, own view frame, same card/status/progress
+        styling). Its page-selection card mirrors Split PDF's own
+        mode-toggle pattern (_update_split_mode_controls) -- "All
+        Pages" vs "Selected Pages", with the range entry only
+        interactive in the latter mode -- rather than Remove/Extract/
+        Rotate's single always-visible text entry, since "every page"
+        is common enough here to deserve its own one-click option
+        rather than requiring "1-N" to be typed out.
+
+        Like Unlock PDF (Phase 19), this tool has no Save As dialog at
+        all -- see _on_page_numbers_execute_clicked()'s own docstring
+        and file_manager.generate_numbered_output_path()'s own
+        docstring for why.
+        """
+        self.page_numbers_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.page_numbers_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="ADD PAGE NUMBERS", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text="Add page numbers to a PDF and save as a new file -- locally, no upload.",
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        # Source file card
+        source_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        source_card.pack(fill="x", pady=(0, 16))
+        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner.pack(fill="x", padx=18, pady=16)
+
+        self.page_numbers_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_page_numbers_select_file_clicked,
+        )
+        self.page_numbers_select_btn.pack(side="left")
+
+        self.page_numbers_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.page_numbers_source_label.pack(side="left", padx=(16, 0))
+
+        # Page range card
+        range_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        range_card.pack(fill="x", pady=(0, 16))
+        range_inner = tk.Frame(range_card, bg=COLOR_CARD)
+        range_inner.pack(fill="x", padx=18, pady=14)
+
+        tk.Label(
+            range_inner, text="Pages to Number", font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        self.page_numbers_all_pages_radio = ttk.Radiobutton(
+            range_inner, text="All pages", value=True,
+            variable=self.page_numbers_all_pages_var,
+            style="Compression.TRadiobutton",
+            command=self._update_page_numbers_mode_controls,
+        )
+        self.page_numbers_all_pages_radio.pack(anchor="w", pady=2)
+
+        selected_row = tk.Frame(range_inner, bg=COLOR_CARD)
+        selected_row.pack(fill="x", pady=2)
+        self.page_numbers_selected_pages_radio = ttk.Radiobutton(
+            selected_row, text="Selected pages:", value=False,
+            variable=self.page_numbers_all_pages_var,
+            style="Compression.TRadiobutton",
+            command=self._update_page_numbers_mode_controls,
+        )
+        self.page_numbers_selected_pages_radio.pack(side="left")
+        self.page_numbers_selection_entry = ttk.Entry(
+            selected_row, textvariable=self.page_numbers_selection_var, width=24,
+        )
+        self.page_numbers_selection_entry.pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            range_inner,
+            text="Example: 1-3,5,8-10  (1-based, inclusive ranges)",
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 0))
+
+        # Options card
+        options_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        options_card.pack(fill="x", pady=(0, 16))
+        options_inner = tk.Frame(options_card, bg=COLOR_CARD)
+        options_inner.pack(fill="x", padx=18, pady=14)
+
+        tk.Label(
+            options_inner, text="Options", font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        start_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        start_row.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            start_row, text="Start number:", width=14, anchor="w",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left")
+        self.page_numbers_start_entry = ttk.Entry(
+            start_row, textvariable=self.page_numbers_start_var, width=8,
+        )
+        self.page_numbers_start_entry.pack(side="left")
+
+        font_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        font_row.pack(fill="x", pady=(0, 8))
+        tk.Label(
+            font_row, text="Font size:", width=14, anchor="w",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left")
+        self.page_numbers_font_size_entry = ttk.Entry(
+            font_row, textvariable=self.page_numbers_font_size_var, width=8,
+        )
+        self.page_numbers_font_size_entry.pack(side="left")
+
+        margin_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        margin_row.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            margin_row, text="Margin:", width=14, anchor="w",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left")
+        self.page_numbers_margin_entry = ttk.Entry(
+            margin_row, textvariable=self.page_numbers_margin_var, width=8,
+        )
+        self.page_numbers_margin_entry.pack(side="left")
+
+        tk.Label(
+            options_inner, text="Position:", font=("Segoe UI", 10),
+            bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(0, 4))
+
+        position_labels = {
+            "top_left": "Top Left", "top_center": "Top Center",
+            "top_right": "Top Right", "bottom_left": "Bottom Left",
+            "bottom_center": "Bottom Center", "bottom_right": "Bottom Right",
+        }
+        self.page_numbers_position_radios = {}
+        top_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        top_row.pack(fill="x", pady=2)
+        bottom_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        bottom_row.pack(fill="x", pady=2)
+        for position in page_numbers_engine.POSITIONS:
+            row = top_row if position.startswith("top_") else bottom_row
+            radio = ttk.Radiobutton(
+                row, text=position_labels[position], value=position,
+                variable=self.page_numbers_position_var,
+                style="Compression.TRadiobutton",
+                command=self._update_page_numbers_feedback,
+            )
+            radio.pack(side="left", padx=(0, 16))
+            self.page_numbers_position_radios[position] = radio
+
+        # Live preview/summary -- no engine run needed just to validate
+        # the configuration, driven entirely by page_numbers_engine's
+        # pure validation functions (resolve_pages_to_number,
+        # validate_start_number, validate_font_size, validate_margin)
+        # via the StringVar traces below.
+        self.page_numbers_feedback_var = tk.StringVar(value="")
+        self.page_numbers_feedback_label = tk.Label(
+            outer, textvariable=self.page_numbers_feedback_var,
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            justify="left", anchor="w",
+        )
+        self.page_numbers_feedback_label.pack(fill="x", pady=(0, 4))
+
+        self.page_numbers_error_var = tk.StringVar(value="")
+        self.page_numbers_error_label = tk.Label(
+            outer, textvariable=self.page_numbers_error_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg="#c0392b",
+            justify="left", anchor="w", wraplength=520,
+        )
+        self.page_numbers_error_label.pack(fill="x", pady=(0, 10))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.page_numbers_button = ttk.Button(
+            action_wrapper, text="ADD PAGE NUMBERS", style="Primary.TButton",
+            command=self._on_page_numbers_execute_clicked, state="disabled",
+        )
+        self.page_numbers_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.page_numbers_status_label = tk.Label(
+            status_frame, textvariable=self.page_numbers_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.page_numbers_status_label.pack(fill="x", pady=(0, 6))
+        self.page_numbers_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.page_numbers_progress_bar.pack(fill="x")
+
+        for var in (
+            self.page_numbers_selection_var, self.page_numbers_start_var,
+            self.page_numbers_font_size_var, self.page_numbers_margin_var,
+        ):
+            var.trace_add("write", self._on_page_numbers_option_changed)
+
+        self._update_page_numbers_mode_controls()
+        self._update_page_numbers_feedback()
+
+    def _on_page_numbers_option_changed(self, *_args) -> None:
+        self._update_page_numbers_feedback()
+
+    def _update_page_numbers_mode_controls(self) -> None:
+        """Only the range entry is interactive in "Selected pages" mode
+        -- mirrors Split PDF's own _update_split_mode_controls().
+        """
+        all_pages = self.page_numbers_all_pages_var.get()
+        self.page_numbers_selection_entry.configure(
+            state="disabled" if all_pages else "normal"
+        )
+        self._update_page_numbers_feedback()
+
+    def _update_page_numbers_feedback(self) -> None:
+        """The single place that keeps the pages/options preview, the
+        validation error message, and the ADD PAGE NUMBERS button's
+        enabled state all in sync with the current configuration --
+        driven purely by page_numbers_engine's pure validation
+        functions (no PDF write), so bad input is caught instantly and
+        can never crash the UI.
+        """
+        self.page_numbers_error_var.set("")
+
+        if self.page_numbers_source is None:
+            self.page_numbers_feedback_var.set("Select a PDF file first.")
+            self.page_numbers_button.configure(state="disabled")
+            return
+
+        page_count = self.page_numbers_source.page_count or 0
+
+        if self.page_numbers_all_pages_var.get():
+            pages_summary = f"Pages: All ({page_count})"
+        else:
+            text = self.page_numbers_selection_var.get()
+            if not text.strip():
+                self.page_numbers_feedback_var.set("Enter pages to number.")
+                self.page_numbers_button.configure(state="disabled")
+                return
+            try:
+                indices = page_numbers_engine.resolve_pages_to_number(
+                    text, page_count,
+                )
+            except split_engine.PageRangeError as exc:
+                self.page_numbers_error_var.set(str(exc))
+                self.page_numbers_feedback_var.set(f"Pages: {text.strip()}")
+                self.page_numbers_button.configure(state="disabled")
+                return
+            pages_summary = f"Pages: {text.strip()} ({len(indices)} selected)"
+
+        try:
+            page_numbers_engine.validate_start_number(
+                self.page_numbers_start_var.get()
+            )
+            page_numbers_engine.validate_font_size(
+                self.page_numbers_font_size_var.get()
+            )
+            page_numbers_engine.validate_margin(
+                self.page_numbers_margin_var.get()
+            )
+        except page_numbers_engine.PageNumberOptionsError as exc:
+            self.page_numbers_error_var.set(str(exc))
+            self.page_numbers_feedback_var.set(pages_summary)
+            self.page_numbers_button.configure(state="disabled")
+            return
+
+        self.page_numbers_feedback_var.set(f"{pages_summary} -- ready to number.")
+        self.page_numbers_button.configure(
+            state="disabled" if self._any_operation_in_progress() else "normal"
+        )
+
+    def _update_page_numbers_controls_state(self) -> None:
+        """The single place that restores Add Page Numbers' own controls
+        to their correct enabled state once no operation is running --
+        mirrors _update_unlock_controls_state()'s role for its own
+        tool.
+        """
+        self.page_numbers_select_btn.configure(state="normal")
+        self.page_numbers_all_pages_radio.configure(state="normal")
+        self.page_numbers_selected_pages_radio.configure(state="normal")
+        self.page_numbers_start_entry.configure(state="normal")
+        self.page_numbers_font_size_entry.configure(state="normal")
+        self.page_numbers_margin_entry.configure(state="normal")
+        for radio in self.page_numbers_position_radios.values():
+            radio.configure(state="normal")
+        self._update_page_numbers_mode_controls()
+        self._update_page_numbers_feedback()
+
+    def _update_page_numbers_source_label(self) -> None:
+        if self.page_numbers_source is None:
+            self.page_numbers_source_label.configure(text="No file selected.")
+        else:
+            self.page_numbers_source_label.configure(
+                text=(
+                    f"{self.page_numbers_source.name}  \u2014  "
+                    f"{self.page_numbers_source.page_count_display}, "
+                    f"{self.page_numbers_source.size_display}"
+                )
+            )
+
     def _select_tool(self, tool_id: str) -> None:
         """Switches the workspace to show the given tool. Unknown tool
         ids are a safe no-op -- selecting a tool that doesn't exist
@@ -2461,6 +2821,7 @@ class MainWindow:
         self.rotate_view.pack_forget()
         self.protect_view.pack_forget()
         self.unlock_view.pack_forget()
+        self.page_numbers_view.pack_forget()
         self.coming_soon_view.pack_forget()
 
         if tool_id == "merge_compress":
@@ -2479,6 +2840,8 @@ class MainWindow:
             self.protect_view.pack(fill="both", expand=True, padx=28, pady=24)
         elif tool_id == "unlock":
             self.unlock_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "page_numbers":
+            self.page_numbers_view.pack(fill="both", expand=True, padx=28, pady=24)
         else:
             # Covers every coming_soon tool, and defensively covers a
             # future "available" tool that doesn't have its own
@@ -2787,15 +3150,16 @@ class MainWindow:
         controls, Remove Pages' own controls -- Phase 14, Extract
         Pages' own controls -- Phase 15, Organize Pages' own controls
         -- Phase 16, Rotate Pages' own controls -- Phase 17, Protect
-        PDF's own controls -- Phase 18, and Unlock PDF's own controls
-        -- Phase 19) agrees on for "is anything running right now" --
-        the Phase 9 "one consistent operation-state mechanism"
-        requirement, now covering all eight tool workspaces. Every tool
-        is treated as mutually exclusive with every other tool too (not
-        just within itself): only one background PDF operation runs at
-        a time app-wide, which is the simplest, safest policy and
-        avoids two threads touching PyMuPDF concurrently (see the
-        Phase 5 delivery notes on multi-threaded PyMuPDF fragility).
+        PDF's own controls -- Phase 18, Unlock PDF's own controls --
+        Phase 19, and Add Page Numbers' own controls -- Phase 20)
+        agrees on for "is anything running right now" -- the Phase 9
+        "one consistent operation-state mechanism" requirement, now
+        covering all nine tool workspaces. Every tool is treated as
+        mutually exclusive with every other tool too (not just within
+        itself): only one background PDF operation runs at a time
+        app-wide, which is the simplest, safest policy and avoids two
+        threads touching PyMuPDF concurrently (see the Phase 5
+        delivery notes on multi-threaded PyMuPDF fragility).
         """
         return (
             self._import_in_progress
@@ -2816,6 +3180,8 @@ class MainWindow:
             or self.protect_in_progress
             or self._unlock_import_in_progress
             or self.unlock_in_progress
+            or self._page_numbers_import_in_progress
+            or self.page_numbers_in_progress
         )
 
     def _assert_main_thread(self) -> None:
@@ -2956,6 +3322,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
         self.status_var.set(f"Status: {self._summarize_import(added, skipped_duplicates, errors)}")
 
@@ -3225,6 +3592,23 @@ class MainWindow:
         self.unlock_show_password_check.configure(state=state)
         self.unlock_clear_btn.configure(state=state)
 
+        # Phase 20: Add Page Numbers' own controls follow the same busy
+        # flag too, for the same reason every other tool's do. The
+        # selection entry is additionally gated on the All/Selected
+        # pages mode (see _update_page_numbers_mode_controls()) --
+        # setting it blanket-disabled here while busy is still correct,
+        # since _update_page_numbers_controls_state() (called below when
+        # re-enabling) re-derives its real state afterward.
+        self.page_numbers_select_btn.configure(state=state)
+        self.page_numbers_all_pages_radio.configure(state=state)
+        self.page_numbers_selected_pages_radio.configure(state=state)
+        self.page_numbers_selection_entry.configure(state="disabled")
+        self.page_numbers_start_entry.configure(state=state)
+        self.page_numbers_font_size_entry.configure(state=state)
+        self.page_numbers_margin_entry.configure(state=state)
+        for radio in self.page_numbers_position_radios.values():
+            radio.configure(state=state)
+
         if enabled:
             # Restore the file-count-dependent rules for the three
             # action buttons (a flat "enabled" isn't correct for them).
@@ -3261,6 +3645,10 @@ class MainWindow:
             # above would otherwise leave it enabled even for an empty
             # password, no source selected, or a non-encrypted source.
             self._update_unlock_controls_state()
+            # Same re-evaluation for ADD PAGE NUMBERS -- also re-derives
+            # the range entry's real state from the current All/Selected
+            # pages mode, rather than leaving it blanket "disabled".
+            self._update_page_numbers_controls_state()
         else:
             # Re-render immediately so per-row Remove/Move Up/Move Down
             # become disabled the instant an operation starts (they read
@@ -3273,6 +3661,7 @@ class MainWindow:
             self.rotate_button.configure(state="disabled")
             self.protect_button.configure(state="disabled")
             self.unlock_button.configure(state="disabled")
+            self.page_numbers_button.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # File list mutation (Phase 5: remove / reorder / clear)
@@ -3486,6 +3875,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -3708,6 +4098,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -3749,6 +4140,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
         succeeded: List[dict] = result["succeeded"]
         failed: List[Tuple[str, str]] = result["failed"]
@@ -3908,6 +4300,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
         if item["success"]:
             result: dict = item["result"]
@@ -4027,6 +4420,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     # ------------------------------------------------------------------
     # Split PDF: the actual split operation (Phase 13)
@@ -4190,6 +4584,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     # ------------------------------------------------------------------
     # Remove Pages: source file import (Phase 14)
@@ -4279,6 +4674,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     def _on_remove_pages_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -4438,6 +4834,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     # ------------------------------------------------------------------
     # Extract Pages: source file import (Phase 15)
@@ -4528,6 +4925,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     def _on_extract_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -4688,6 +5086,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: source file import (Phase 16)
@@ -4784,6 +5183,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: the actual reorder operation (Phase 16)
@@ -4933,6 +5333,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     # ------------------------------------------------------------------
     # Rotate Pages: source file import (Phase 17)
@@ -5029,6 +5430,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     def _on_rotate_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -5193,6 +5595,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     # ------------------------------------------------------------------
     # Protect PDF: source file import (Phase 18)
@@ -5283,6 +5686,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     def _on_protect_clear_clicked(self) -> None:
         """Resets password/confirm-password (and the permission
@@ -5502,6 +5906,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     # ------------------------------------------------------------------
     # Unlock PDF: source file import (Phase 19)
@@ -5605,6 +6010,7 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
     def _on_unlock_clear_clicked(self) -> None:
         """Resets the password field but keeps the selected source PDF
@@ -5786,6 +6192,274 @@ class MainWindow:
         self._update_rotate_controls_state()
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
+
+    # ------------------------------------------------------------------
+    # Add Page Numbers: source file import (Phase 20)
+    # ------------------------------------------------------------------
+
+    def _on_page_numbers_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.page_numbers_status_var.set("Status: Ready")
+            return
+
+        self._start_page_numbers_import(path)
+
+    def _start_page_numbers_import(self, path: Path) -> None:
+        self._page_numbers_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.page_numbers_status_var.set("Status: Validating file...")
+        self.page_numbers_progress_bar.configure(mode="indeterminate")
+        self.page_numbers_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._page_numbers_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_page_numbers_import_queue)
+
+    def _page_numbers_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls pdf_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly.
+        """
+        try:
+            info = pdf_engine.get_pdf_info(path)
+            self._page_numbers_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._page_numbers_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._page_numbers_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_page_numbers_import_queue(self) -> None:
+        try:
+            result = self._page_numbers_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_page_numbers_import_queue)
+            return
+        self._apply_page_numbers_import_result(result)
+
+    def _apply_page_numbers_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.page_numbers_progress_bar.stop()
+        self.page_numbers_progress_bar.configure(mode="determinate", value=0)
+        self._page_numbers_import_in_progress = False
+
+        if result["success"]:
+            self.page_numbers_source = models.PDFFile(**result["info"])
+            self._update_page_numbers_source_label()
+            self.page_numbers_status_var.set(
+                f"Status: Selected '{self.page_numbers_source.name}'."
+            )
+        else:
+            self.page_numbers_source = None
+            self._update_page_numbers_source_label()
+            self.page_numbers_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Add Page Numbers' import shares the same app-wide busy lock, so
+        # its completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+        self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
+
+    # ------------------------------------------------------------------
+    # Add Page Numbers: the actual operation (Phase 20)
+    # ------------------------------------------------------------------
+
+    def _on_page_numbers_execute_clicked(self) -> None:
+        """Unlike every Save-As-dialog tool (Remove/Extract/Organize/
+        Rotate/Protect), this one never opens a native Save As dialog --
+        per the Phase 20 spec, Add Page Numbers' output path is fully
+        automatic and collision-safe
+        (file_manager.generate_numbered_output_path(), writing next to
+        the source), exactly like Unlock PDF's own equivalent design in
+        Phase 19. See that function's own docstring for why.
+        """
+        if self._any_operation_in_progress():
+            return
+        if self.page_numbers_source is None:
+            return  # defensive; button should be disabled without a source
+
+        page_count = self.page_numbers_source.page_count or 0
+
+        if self.page_numbers_all_pages_var.get():
+            page_indices = list(range(page_count))
+        else:
+            text = self.page_numbers_selection_var.get()
+            try:
+                page_indices = page_numbers_engine.resolve_pages_to_number(
+                    text, page_count,
+                )
+            except split_engine.PageRangeError as exc:
+                self.page_numbers_error_var.set(str(exc))
+                self.page_numbers_status_var.set(f"Status: {exc}")
+                messagebox.showerror(
+                    title="Invalid Page Selection", message=str(exc),
+                    parent=self.root,
+                )
+                return
+
+        try:
+            start_number = page_numbers_engine.validate_start_number(
+                self.page_numbers_start_var.get()
+            )
+            font_size = page_numbers_engine.validate_font_size(
+                self.page_numbers_font_size_var.get()
+            )
+            margin = page_numbers_engine.validate_margin(
+                self.page_numbers_margin_var.get()
+            )
+        except page_numbers_engine.PageNumberOptionsError as exc:
+            self.page_numbers_error_var.set(str(exc))
+            self.page_numbers_status_var.set(f"Status: {exc}")
+            messagebox.showerror(
+                title="Invalid Option", message=str(exc), parent=self.root,
+            )
+            return
+
+        position = self.page_numbers_position_var.get()
+
+        output_path = file_manager.generate_numbered_output_path(
+            self.page_numbers_source.path, self.page_numbers_source.path.parent,
+        )
+
+        self._start_page_numbers(
+            self.page_numbers_source.path, output_path, page_indices,
+            start_number, position, font_size, margin,
+        )
+
+    def _start_page_numbers(
+        self, source_path: Path, output_path: Path, page_indices: List[int],
+        start_number: int, position: str, font_size: float, margin: float,
+    ) -> None:
+        self.page_numbers_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.page_numbers_status_var.set("Status: Adding page numbers...")
+        self.page_numbers_progress_bar.configure(mode="indeterminate")
+        self.page_numbers_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._page_numbers_worker,
+            args=(
+                source_path, output_path, page_indices, start_number,
+                position, font_size, margin,
+            ),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_page_numbers_queue)
+
+    def _page_numbers_worker(
+        self, source_path: Path, output_path: Path, page_indices: List[int],
+        start_number: int, position: str, font_size: float, margin: float,
+    ) -> None:
+        """Runs on a background thread. Calls
+        page_numbers_engine.add_page_numbers() directly. Must not touch
+        any tkinter widget; only the thread-safe queue is used to
+        report back.
+        """
+        def report(message: str) -> None:
+            self._page_numbers_queue.put({"type": "progress", "message": message})
+
+        try:
+            result_path = page_numbers_engine.add_page_numbers(
+                source_path, output_path, page_indices,
+                start_number=start_number, position=position,
+                font_size=font_size, margin=margin, progress_callback=report,
+            )
+            self._page_numbers_queue.put({
+                "type": "done", "success": True,
+                "output_path": result_path, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._page_numbers_queue.put({
+                "type": "done", "success": False,
+                "output_path": None, "error": str(exc),
+            })
+        except Exception:
+            self._page_numbers_queue.put({
+                "type": "done", "success": False, "output_path": None,
+                "error": "An unexpected error occurred while adding page numbers.",
+            })
+
+    def _poll_page_numbers_queue(self) -> None:
+        try:
+            while True:
+                item = self._page_numbers_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.page_numbers_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_page_numbers_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_page_numbers_queue)
+
+    def _apply_page_numbers_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.page_numbers_progress_bar.stop()
+        self.page_numbers_progress_bar.configure(mode="determinate", value=0)
+
+        self.page_numbers_in_progress = False
+
+        if item["success"]:
+            output_path = item["output_path"]
+            self.page_numbers_status_var.set(
+                f"Status: Page numbers added successfully. Saved to "
+                f"'{output_path.name}'."
+            )
+            # A completed operation has fully consumed its source,
+            # mirroring every other tool's own post-completion behavior:
+            # clear it so the workspace returns to its non-file-selected
+            # initial state. Must happen before
+            # _update_page_numbers_controls_state() below so ADD PAGE
+            # NUMBERS correctly goes back to "disabled" (it depends on
+            # self.page_numbers_source).
+            self.page_numbers_source = None
+            self._update_page_numbers_source_label()
+            self.page_numbers_selection_var.set("")
+        else:
+            self.page_numbers_status_var.set("Status: Add Page Numbers failed.")
+            messagebox.showerror(
+                title="Add Page Numbers Failed", message=item["error"],
+                parent=self.root,
+            )
+
+        self._update_button_states()
+        # Bug fix: see the matching comment in _apply_import_results() --
+        # Add Page Numbers shares the same app-wide busy lock, so its
+        # completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+        self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
 
 
 def run() -> None:

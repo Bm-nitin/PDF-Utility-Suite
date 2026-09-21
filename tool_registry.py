@@ -134,7 +134,7 @@ PAGE_NUMBERS = Tool(
     id="page_numbers",
     name="Add Page Numbers",
     description="Add page numbers to every page of a PDF.",
-    status=STATUS_COMING_SOON,
+    status=STATUS_AVAILABLE,
     category="edit",
 )
 

@@ -342,3 +342,31 @@ def generate_unlocked_output_path(source_path: Path, output_dir: Path) -> Path:
     stem = sanitize_windows_filename(source_path.stem)
     return _find_collision_free_path(output_dir, f"{stem}_unlocked")
 
+
+def generate_numbered_output_path(source_path: Path, output_dir: Path) -> Path:
+    """Generate a collision-safe destination path for a page-numbered
+    copy of `source_path` (Phase 20), following the exact same naming/
+    collision pattern as generate_compressed_output_path(),
+    generate_split_output_path(), and generate_unlocked_output_path()
+    above: "<stem>_numbered.pdf", auto-incrementing with " (1)", " (2)",
+    etc. if that name is already taken. Never returns a path that
+    already exists.
+
+    Like Unlock PDF (Phase 19), and unlike Remove Pages/Extract Pages/
+    Organize Pages/Rotate Pages/Protect PDF, Page Numbers writes its
+    output automatically next to the source, with no Save As dialog --
+    the Phase 20 spec's own explicit collision-naming requirements
+    ("document_numbered.pdf", " (1)", " (2)", "never overwrite
+    automatically") only make sense without one, exactly as reasoned
+    through for generate_unlocked_output_path() above. `output_dir` is
+    expected to be `source_path.parent` in normal use (see ui.py's
+    _on_page_numbers_execute_clicked()), but is accepted as a parameter
+    for the same testability reasons every generate_*_output_path()
+    function here does.
+    """
+    source_path = Path(source_path)
+    output_dir = Path(output_dir)
+
+    stem = sanitize_windows_filename(source_path.stem)
+    return _find_collision_free_path(output_dir, f"{stem}_numbered")
+
