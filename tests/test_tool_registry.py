@@ -60,18 +60,20 @@ def test_merge_compress_split_remove_extract_organize_rotate_protect_unlock_and_
     made Remove Pages the third; Phase 15 made Extract Pages the fourth;
     Phase 16 made Organize Pages the fifth; Phase 17 made Rotate the
     sixth; Phase 18 made Protect PDF the seventh; Phase 19 made Unlock
-    PDF the eighth; Phase 20 makes Add Page Numbers the ninth. Every
-    other future tool remains coming_soon until its own phase.
+    PDF the eighth; Phase 20 made Add Page Numbers the ninth; Phase 21
+    makes Add Watermark the tenth. Every other future tool remains
+    coming_soon until its own phase.
     """
     available_ids = {t.id for t in tool_registry.get_all_tools() if t.is_available}
     assert available_ids == {
         "merge_compress", "split", "remove_pages", "extract_pages",
         "organize_pages", "rotate", "protect", "unlock", "page_numbers",
+        "watermark",
     }
 
 
-def test_two_future_tools_are_registered_as_coming_soon():
-    expected_ids = {"watermark", "images_to_pdf"}
+def test_one_future_tool_is_registered_as_coming_soon():
+    expected_ids = {"images_to_pdf"}
     coming_soon_ids = {
         t.id for t in tool_registry.get_all_tools() if not t.is_available
     }
@@ -278,3 +280,26 @@ def test_page_numbers_tool_specifically_registered():
     # test_get_tools_by_category_edit_contains_page_numbers_and_
     # watermark (unchanged from before Phase 20) already locks this in.
     assert tool.category == "edit"
+
+
+def test_watermark_tool_specifically_registered():
+    tool = tool_registry.get_tool("watermark")
+    assert tool is not None
+    assert tool.name == "Add Watermark"
+    assert tool.description == "Overlay a text watermark on the pages of a PDF."
+    assert tool.status == STATUS_AVAILABLE
+    assert tool.is_available
+    # Id, name and category are all left unchanged from their
+    # pre-existing values -- Phase 21 flips status from coming_soon to
+    # available (and corrects the description, which previously
+    # promised image watermarks and "every page" only; this tool is
+    # text-only and supports page selection).
+    # test_get_tools_by_category_edit_contains_page_numbers_and_watermark
+    # (unchanged from before Phase 21) already locks the category in.
+    assert tool.category == "edit"
+
+
+def test_watermark_keeps_its_position_in_registry_order():
+    ids = [t.id for t in tool_registry.get_all_tools()]
+    assert ids.index("page_numbers") + 1 == ids.index("watermark")
+    assert ids.index("watermark") + 1 == ids.index("images_to_pdf")

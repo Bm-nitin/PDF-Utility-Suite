@@ -141,8 +141,8 @@ PAGE_NUMBERS = Tool(
 WATERMARK = Tool(
     id="watermark",
     name="Add Watermark",
-    description="Overlay a text or image watermark on every page of a PDF.",
-    status=STATUS_COMING_SOON,
+    description="Overlay a text watermark on the pages of a PDF.",
+    status=STATUS_AVAILABLE,
     category="edit",
 )
 

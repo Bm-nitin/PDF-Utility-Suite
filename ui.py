@@ -68,7 +68,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import colorchooser, messagebox, ttk
 
 import extract_engine
 import file_manager
@@ -82,6 +82,7 @@ import rotate_engine
 import split_engine
 import tool_registry
 import unlock_engine
+import watermark_engine
 from config import APP_NAME, APP_VERSION
 
 # ---------------------------------------------------------------------------
@@ -400,6 +401,54 @@ class MainWindow:
         self._page_numbers_queue: "queue.Queue[dict]" = queue.Queue()
         self.page_numbers_in_progress = False
 
+        # Phase 21: Add Watermark's own state, deliberately separate
+        # from every other tool's -- single source + a live-validated
+        # page-selection text (reusing split_engine.parse_page_ranges()
+        # via watermark_engine.resolve_pages_to_watermark(), exactly
+        # like Add Page Numbers' own page-selection state), a mode
+        # toggle between "all pages" and "selected pages", and the
+        # watermark's own options (text, position, font size, opacity,
+        # rotation, color) -- see watermark_engine.py's module docstring.
+        # Every option is held as the raw string/identifier the widget
+        # shows and validated by watermark_engine's pure validators, so
+        # the engine's API (stable position/color identifiers, degrees,
+        # percent opacity), never the UI's display labels, is the
+        # contract. Like Unlock PDF (Phase 19) and Add Page Numbers
+        # (Phase 20), this tool has no output Save As dialog -- see
+        # file_manager.generate_watermarked_output_path()'s own
+        # docstring for why -- so there is no output-path state to track
+        # here either; the resulting path is shown directly in
+        # self.watermark_status_var once the operation completes.
+        self.watermark_source: Optional[models.PDFFile] = None
+        self.watermark_text_var = tk.StringVar(value=watermark_engine.DEFAULT_TEXT)
+        self.watermark_all_pages_var = tk.BooleanVar(value=True)
+        self.watermark_selection_var = tk.StringVar(value="")
+        self.watermark_position_var = tk.StringVar(
+            value=watermark_engine.DEFAULT_POSITION
+        )
+        self.watermark_font_size_var = tk.StringVar(
+            value=f"{watermark_engine.DEFAULT_FONT_SIZE:g}"
+        )
+        self.watermark_opacity_var = tk.StringVar(
+            value=f"{watermark_engine.DEFAULT_OPACITY:g}"
+        )
+        self.watermark_rotation_var = tk.StringVar(
+            value=str(watermark_engine.DEFAULT_ROTATION)
+        )
+        # A preset key from watermark_engine.COLOR_PRESETS, or "custom"
+        # (in which case self.watermark_custom_color holds the chosen
+        # normalized RGB tuple).
+        self.watermark_color_var = tk.StringVar(
+            value=watermark_engine.DEFAULT_COLOR_NAME
+        )
+        self.watermark_custom_color = None
+        self.watermark_status_var = tk.StringVar(value="Status: Ready")
+
+        self._watermark_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._watermark_import_in_progress = False
+        self._watermark_queue: "queue.Queue[dict]" = queue.Queue()
+        self.watermark_in_progress = False
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -568,6 +617,7 @@ class MainWindow:
         self._build_protect_workspace(self.workspace_container)
         self._build_unlock_workspace(self.workspace_container)
         self._build_page_numbers_workspace(self.workspace_container)
+        self._build_watermark_workspace(self.workspace_container)
 
         self._select_tool(self.current_tool_id)
 
@@ -2802,6 +2852,451 @@ class MainWindow:
                 )
             )
 
+    # ------------------------------------------------------------------
+    # Add Watermark workspace (Phase 21)
+    # ------------------------------------------------------------------
+
+    def _build_watermark_workspace(self, parent: tk.Widget) -> None:
+        """Phase 21: the Add Watermark tool's dedicated workspace.
+
+        Follows the same overall shape as every other single-source
+        tool (own state, own view frame, same card/status/progress
+        styling). Its page-selection card mirrors Add Page Numbers' own
+        "All pages" / "Selected pages" mode toggle. Like Unlock PDF
+        (Phase 19) and Add Page Numbers (Phase 20), this tool has no
+        Save As dialog at all -- see _on_watermark_execute_clicked()'s
+        own docstring and file_manager.generate_watermarked_output_path()'s
+        own docstring for why.
+
+        Every control's value is validated live, by
+        watermark_engine's pure validation functions (see
+        _update_watermark_feedback()), so the ADD WATERMARK button is
+        only ever enabled for a configuration the worker can act on.
+        """
+        self.watermark_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.watermark_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="ADD WATERMARK", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text=(
+                "Overlay a text watermark on a PDF and save as a new "
+                "file -- locally, no upload."
+            ),
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        def make_card(pady_inner: int = 14) -> tk.Frame:
+            card = tk.Frame(
+                outer, bg=COLOR_CARD,
+                highlightbackground=COLOR_BORDER, highlightthickness=1,
+            )
+            card.pack(fill="x", pady=(0, 16))
+            inner = tk.Frame(card, bg=COLOR_CARD)
+            inner.pack(fill="x", padx=18, pady=pady_inner)
+            return inner
+
+        def make_row_label(row: tk.Frame, text: str) -> None:
+            tk.Label(
+                row, text=text, width=14, anchor="w",
+                font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            ).pack(side="left")
+
+        # Source file card
+        source_inner = make_card(pady_inner=16)
+        self.watermark_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_watermark_select_file_clicked,
+        )
+        self.watermark_select_btn.pack(side="left")
+        self.watermark_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.watermark_source_label.pack(side="left", padx=(16, 0))
+
+        # Watermark text card
+        text_inner = make_card()
+        tk.Label(
+            text_inner, text="Watermark Text", font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+        self.watermark_text_entry = ttk.Entry(
+            text_inner, textvariable=self.watermark_text_var, width=48,
+        )
+        self.watermark_text_entry.pack(anchor="w")
+        tk.Label(
+            text_inner,
+            text="Example: CONFIDENTIAL, DRAFT, DO NOT COPY  (one line)",
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 0))
+
+        # Page range card
+        range_inner = make_card()
+        tk.Label(
+            range_inner, text="Pages to Watermark",
+            font=("Segoe UI", 11, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        self.watermark_all_pages_radio = ttk.Radiobutton(
+            range_inner, text="All pages", value=True,
+            variable=self.watermark_all_pages_var,
+            style="Compression.TRadiobutton",
+            command=self._update_watermark_mode_controls,
+        )
+        self.watermark_all_pages_radio.pack(anchor="w", pady=2)
+
+        selected_row = tk.Frame(range_inner, bg=COLOR_CARD)
+        selected_row.pack(fill="x", pady=2)
+        self.watermark_selected_pages_radio = ttk.Radiobutton(
+            selected_row, text="Selected pages:", value=False,
+            variable=self.watermark_all_pages_var,
+            style="Compression.TRadiobutton",
+            command=self._update_watermark_mode_controls,
+        )
+        self.watermark_selected_pages_radio.pack(side="left")
+        self.watermark_selection_entry = ttk.Entry(
+            selected_row, textvariable=self.watermark_selection_var, width=24,
+        )
+        self.watermark_selection_entry.pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            range_inner,
+            text="Example: 1-3,5,8-10  (1-based, inclusive ranges)",
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 0))
+
+        # Appearance card
+        appearance_inner = make_card()
+        tk.Label(
+            appearance_inner, text="Appearance", font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        font_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        font_row.pack(fill="x", pady=(0, 8))
+        make_row_label(font_row, "Font size:")
+        self.watermark_font_size_entry = ttk.Entry(
+            font_row, textvariable=self.watermark_font_size_var, width=8,
+        )
+        self.watermark_font_size_entry.pack(side="left")
+        tk.Label(
+            font_row, text="pt", font=("Segoe UI", 10),
+            bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left", padx=(6, 0))
+
+        opacity_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        opacity_row.pack(fill="x", pady=(0, 8))
+        make_row_label(opacity_row, "Opacity:")
+        self.watermark_opacity_entry = ttk.Entry(
+            opacity_row, textvariable=self.watermark_opacity_var, width=8,
+        )
+        self.watermark_opacity_entry.pack(side="left")
+        tk.Label(
+            opacity_row, text="%  (0 = invisible, 100 = solid)",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left", padx=(6, 0))
+
+        rotation_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        rotation_row.pack(fill="x", pady=(0, 8))
+        make_row_label(rotation_row, "Rotation:")
+        self.watermark_rotation_combo = ttk.Combobox(
+            rotation_row, textvariable=self.watermark_rotation_var,
+            values=[str(r) for r in watermark_engine.ROTATIONS],
+            state="readonly", width=6,
+        )
+        self.watermark_rotation_combo.pack(side="left")
+        tk.Label(
+            rotation_row, text="degrees, counter-clockwise",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            appearance_inner, text="Color:", font=("Segoe UI", 10),
+            bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 4))
+
+        color_labels = {
+            "black": "Black", "gray": "Gray", "red": "Red",
+            "blue": "Blue", "green": "Green",
+        }
+        self.watermark_color_radios = {}
+        color_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        color_row.pack(fill="x", pady=2)
+        for color_name in watermark_engine.COLOR_PRESETS:
+            radio = ttk.Radiobutton(
+                color_row, text=color_labels[color_name], value=color_name,
+                variable=self.watermark_color_var,
+                style="Compression.TRadiobutton",
+            )
+            radio.pack(side="left", padx=(0, 16))
+            self.watermark_color_radios[color_name] = radio
+
+        custom_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        custom_row.pack(fill="x", pady=(4, 0))
+        custom_radio = ttk.Radiobutton(
+            custom_row, text="Custom", value="custom",
+            variable=self.watermark_color_var,
+            style="Compression.TRadiobutton",
+        )
+        custom_radio.pack(side="left", padx=(0, 8))
+        self.watermark_color_radios["custom"] = custom_radio
+        self.watermark_color_swatch = tk.Label(
+            custom_row, text="", width=4, bg=COLOR_BORDER,
+            highlightbackground=COLOR_TEXT_MUTED, highlightthickness=1,
+        )
+        self.watermark_color_swatch.pack(side="left", padx=(0, 8))
+        self.watermark_color_choose_btn = ttk.Button(
+            custom_row, text="Choose\u2026",
+            command=self._on_watermark_choose_color_clicked,
+        )
+        self.watermark_color_choose_btn.pack(side="left")
+
+        # Position card
+        position_inner = make_card()
+        tk.Label(
+            position_inner, text="Position", font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        position_labels = {
+            "top_left": "Top Left", "top_center": "Top Center",
+            "top_right": "Top Right", "center_left": "Center Left",
+            "center": "Center", "center_right": "Center Right",
+            "bottom_left": "Bottom Left", "bottom_center": "Bottom Center",
+            "bottom_right": "Bottom Right",
+        }
+        self.watermark_position_radios = {}
+        grid = tk.Frame(position_inner, bg=COLOR_CARD)
+        grid.pack(anchor="w")
+        for index, position in enumerate(watermark_engine.POSITIONS):
+            radio = ttk.Radiobutton(
+                grid, text=position_labels[position], value=position,
+                variable=self.watermark_position_var,
+                style="Compression.TRadiobutton",
+            )
+            radio.grid(
+                row=index // 3, column=index % 3, sticky="w",
+                padx=(0, 24), pady=2,
+            )
+            self.watermark_position_radios[position] = radio
+
+        # Live summary + validation message -- driven entirely by
+        # watermark_engine's pure validation functions via the variable
+        # traces below, so no PDF write is needed just to validate.
+        self.watermark_feedback_var = tk.StringVar(value="")
+        self.watermark_feedback_label = tk.Label(
+            outer, textvariable=self.watermark_feedback_var,
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            justify="left", anchor="w",
+        )
+        self.watermark_feedback_label.pack(fill="x", pady=(0, 4))
+
+        self.watermark_error_var = tk.StringVar(value="")
+        self.watermark_error_label = tk.Label(
+            outer, textvariable=self.watermark_error_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg="#c0392b",
+            justify="left", anchor="w", wraplength=520,
+        )
+        self.watermark_error_label.pack(fill="x", pady=(0, 10))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.watermark_button = ttk.Button(
+            action_wrapper, text="ADD WATERMARK", style="Primary.TButton",
+            command=self._on_watermark_execute_clicked, state="disabled",
+        )
+        self.watermark_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.watermark_status_label = tk.Label(
+            status_frame, textvariable=self.watermark_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.watermark_status_label.pack(fill="x", pady=(0, 6))
+        self.watermark_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.watermark_progress_bar.pack(fill="x")
+
+        for var in (
+            self.watermark_text_var, self.watermark_selection_var,
+            self.watermark_font_size_var, self.watermark_opacity_var,
+            self.watermark_rotation_var, self.watermark_position_var,
+            self.watermark_color_var,
+        ):
+            var.trace_add("write", self._on_watermark_option_changed)
+
+        self._update_watermark_mode_controls()
+        self._update_watermark_feedback()
+
+    def _on_watermark_option_changed(self, *_args) -> None:
+        self._update_watermark_feedback()
+
+    def _update_watermark_mode_controls(self) -> None:
+        """Only the range entry is interactive in "Selected pages" mode
+        -- mirrors _update_page_numbers_mode_controls().
+        """
+        all_pages = self.watermark_all_pages_var.get()
+        self.watermark_selection_entry.configure(
+            state="disabled" if all_pages else "normal"
+        )
+        self._update_watermark_feedback()
+
+    def _resolve_watermark_color(self):
+        """Returns the currently selected color as the engine's
+        normalized RGB tuple. Raises WatermarkOptionsError for an
+        unknown selection or a "Custom" selection with no color chosen
+        yet.
+        """
+        selection = self.watermark_color_var.get()
+        if selection == "custom":
+            if self.watermark_custom_color is None:
+                raise watermark_engine.WatermarkOptionsError(
+                    "Choose a custom color."
+                )
+            return watermark_engine.validate_color(self.watermark_custom_color)
+        if selection not in watermark_engine.COLOR_PRESETS:
+            raise watermark_engine.WatermarkOptionsError(
+                "Choose a watermark color."
+            )
+        return watermark_engine.COLOR_PRESETS[selection]
+
+    def _update_watermark_feedback(self) -> None:
+        """The single place that keeps the pages/options summary, the
+        validation error message, and the ADD WATERMARK button's enabled
+        state all in sync with the current configuration -- driven
+        purely by watermark_engine's pure validation functions (no PDF
+        write), so bad input is caught before any worker starts and can
+        never crash the UI.
+        """
+        self.watermark_error_var.set("")
+
+        if self.watermark_source is None:
+            self.watermark_feedback_var.set("Select a PDF file first.")
+            self.watermark_button.configure(state="disabled")
+            return
+
+        page_count = self.watermark_source.page_count or 0
+
+        if self.watermark_all_pages_var.get():
+            pages_summary = f"Pages: All ({page_count})"
+        else:
+            text = self.watermark_selection_var.get()
+            if not text.strip():
+                self.watermark_feedback_var.set("Enter pages to watermark.")
+                self.watermark_button.configure(state="disabled")
+                return
+            try:
+                indices = watermark_engine.resolve_pages_to_watermark(
+                    text, page_count,
+                )
+            except split_engine.PageRangeError as exc:
+                self.watermark_error_var.set(str(exc))
+                self.watermark_feedback_var.set(f"Pages: {text.strip()}")
+                self.watermark_button.configure(state="disabled")
+                return
+            pages_summary = f"Pages: {text.strip()} ({len(indices)} selected)"
+
+        try:
+            watermark_engine.validate_text(self.watermark_text_var.get())
+            watermark_engine.validate_font_size(self.watermark_font_size_var.get())
+            watermark_engine.validate_opacity(self.watermark_opacity_var.get())
+            watermark_engine.validate_rotation(self.watermark_rotation_var.get())
+            watermark_engine.validate_position(self.watermark_position_var.get())
+            self._resolve_watermark_color()
+        except watermark_engine.WatermarkOptionsError as exc:
+            self.watermark_error_var.set(str(exc))
+            self.watermark_feedback_var.set(pages_summary)
+            self.watermark_button.configure(state="disabled")
+            return
+
+        self.watermark_feedback_var.set(f"{pages_summary} -- ready to watermark.")
+        self.watermark_button.configure(
+            state="disabled" if self._any_operation_in_progress() else "normal"
+        )
+
+    def _update_watermark_controls_state(self) -> None:
+        """The single place that restores Add Watermark's own controls
+        to their correct enabled state once no operation is running --
+        mirrors _update_page_numbers_controls_state()'s role for its own
+        tool.
+        """
+        self.watermark_select_btn.configure(state="normal")
+        self.watermark_text_entry.configure(state="normal")
+        self.watermark_all_pages_radio.configure(state="normal")
+        self.watermark_selected_pages_radio.configure(state="normal")
+        self.watermark_font_size_entry.configure(state="normal")
+        self.watermark_opacity_entry.configure(state="normal")
+        self.watermark_rotation_combo.configure(state="readonly")
+        for radio in self.watermark_position_radios.values():
+            radio.configure(state="normal")
+        for radio in self.watermark_color_radios.values():
+            radio.configure(state="normal")
+        self.watermark_color_choose_btn.configure(state="normal")
+        self._update_watermark_mode_controls()
+        self._update_watermark_feedback()
+
+    def _update_watermark_source_label(self) -> None:
+        if self.watermark_source is None:
+            self.watermark_source_label.configure(text="No file selected.")
+        else:
+            self.watermark_source_label.configure(
+                text=(
+                    f"{self.watermark_source.name}  \u2014  "
+                    f"{self.watermark_source.page_count_display}, "
+                    f"{self.watermark_source.size_display}"
+                )
+            )
+
+    def _on_watermark_choose_color_clicked(self) -> None:
+        """Opens the native color chooser (tkinter.colorchooser -- no
+        external dependency) and, if the user picks a color, stores it
+        as the "Custom" color and selects it. Cancelling leaves the
+        current selection untouched.
+        """
+        if self._any_operation_in_progress():
+            return
+
+        initial = None
+        if self.watermark_custom_color is not None:
+            initial = self._watermark_color_to_hex(self.watermark_custom_color)
+
+        rgb, _hex_value = colorchooser.askcolor(
+            color=initial, parent=self.root, title="Choose Watermark Color",
+        )
+        if rgb is None:
+            return
+
+        try:
+            color = watermark_engine.color_from_rgb255(
+                *(int(round(channel)) for channel in rgb)
+            )
+        except (watermark_engine.WatermarkOptionsError, TypeError, ValueError):
+            return
+
+        self.watermark_custom_color = color
+        self.watermark_color_swatch.configure(
+            bg=self._watermark_color_to_hex(color)
+        )
+        self.watermark_color_var.set("custom")
+        self._update_watermark_feedback()
+
+    @staticmethod
+    def _watermark_color_to_hex(color) -> str:
+        red, green, blue = (int(round(channel * 255)) for channel in color)
+        return f"#{red:02x}{green:02x}{blue:02x}"
+
     def _select_tool(self, tool_id: str) -> None:
         """Switches the workspace to show the given tool. Unknown tool
         ids are a safe no-op -- selecting a tool that doesn't exist
@@ -2822,6 +3317,7 @@ class MainWindow:
         self.protect_view.pack_forget()
         self.unlock_view.pack_forget()
         self.page_numbers_view.pack_forget()
+        self.watermark_view.pack_forget()
         self.coming_soon_view.pack_forget()
 
         if tool_id == "merge_compress":
@@ -2842,6 +3338,8 @@ class MainWindow:
             self.unlock_view.pack(fill="both", expand=True, padx=28, pady=24)
         elif tool_id == "page_numbers":
             self.page_numbers_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "watermark":
+            self.watermark_view.pack(fill="both", expand=True, padx=28, pady=24)
         else:
             # Covers every coming_soon tool, and defensively covers a
             # future "available" tool that doesn't have its own
@@ -3151,10 +3649,11 @@ class MainWindow:
         Pages' own controls -- Phase 15, Organize Pages' own controls
         -- Phase 16, Rotate Pages' own controls -- Phase 17, Protect
         PDF's own controls -- Phase 18, Unlock PDF's own controls --
-        Phase 19, and Add Page Numbers' own controls -- Phase 20)
+        Phase 19, Add Page Numbers' own controls -- Phase 20, and Add
+        Watermark's own controls -- Phase 21)
         agrees on for "is anything running right now" -- the Phase 9
         "one consistent operation-state mechanism" requirement, now
-        covering all nine tool workspaces. Every tool is treated as
+        covering all ten tool workspaces. Every tool is treated as
         mutually exclusive with every other tool too (not just within
         itself): only one background PDF operation runs at a time
         app-wide, which is the simplest, safest policy and avoids two
@@ -3182,6 +3681,8 @@ class MainWindow:
             or self.unlock_in_progress
             or self._page_numbers_import_in_progress
             or self.page_numbers_in_progress
+            or self._watermark_import_in_progress
+            or self.watermark_in_progress
         )
 
     def _assert_main_thread(self) -> None:
@@ -3323,6 +3824,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
         self.status_var.set(f"Status: {self._summarize_import(added, skipped_duplicates, errors)}")
 
@@ -3609,6 +4111,30 @@ class MainWindow:
         for radio in self.page_numbers_position_radios.values():
             radio.configure(state=state)
 
+        # Phase 21: Add Watermark's own controls follow the same busy
+        # flag too, for the same reason every other tool's do. The
+        # selection entry is additionally gated on the All/Selected
+        # pages mode (see _update_watermark_mode_controls()) -- setting
+        # it blanket-disabled here while busy is still correct, since
+        # _update_watermark_controls_state() (called below when
+        # re-enabling) re-derives its real state afterward. The rotation
+        # combobox is read-only (never free-typed) when enabled.
+        self.watermark_select_btn.configure(state=state)
+        self.watermark_text_entry.configure(state=state)
+        self.watermark_all_pages_radio.configure(state=state)
+        self.watermark_selected_pages_radio.configure(state=state)
+        self.watermark_selection_entry.configure(state="disabled")
+        self.watermark_font_size_entry.configure(state=state)
+        self.watermark_opacity_entry.configure(state=state)
+        self.watermark_rotation_combo.configure(
+            state="readonly" if enabled else "disabled"
+        )
+        for radio in self.watermark_position_radios.values():
+            radio.configure(state=state)
+        for radio in self.watermark_color_radios.values():
+            radio.configure(state=state)
+        self.watermark_color_choose_btn.configure(state=state)
+
         if enabled:
             # Restore the file-count-dependent rules for the three
             # action buttons (a flat "enabled" isn't correct for them).
@@ -3649,6 +4175,7 @@ class MainWindow:
             # the range entry's real state from the current All/Selected
             # pages mode, rather than leaving it blanket "disabled".
             self._update_page_numbers_controls_state()
+            self._update_watermark_controls_state()
         else:
             # Re-render immediately so per-row Remove/Move Up/Move Down
             # become disabled the instant an operation starts (they read
@@ -3662,6 +4189,7 @@ class MainWindow:
             self.protect_button.configure(state="disabled")
             self.unlock_button.configure(state="disabled")
             self.page_numbers_button.configure(state="disabled")
+            self.watermark_button.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # File list mutation (Phase 5: remove / reorder / clear)
@@ -3876,6 +4404,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -4099,6 +4628,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -4141,6 +4671,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
         succeeded: List[dict] = result["succeeded"]
         failed: List[Tuple[str, str]] = result["failed"]
@@ -4301,6 +4832,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
         if item["success"]:
             result: dict = item["result"]
@@ -4421,6 +4953,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Split PDF: the actual split operation (Phase 13)
@@ -4585,6 +5118,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Remove Pages: source file import (Phase 14)
@@ -4675,6 +5209,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     def _on_remove_pages_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -4835,6 +5370,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Extract Pages: source file import (Phase 15)
@@ -4926,6 +5462,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     def _on_extract_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -5087,6 +5624,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: source file import (Phase 16)
@@ -5184,6 +5722,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: the actual reorder operation (Phase 16)
@@ -5334,6 +5873,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Rotate Pages: source file import (Phase 17)
@@ -5431,6 +5971,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     def _on_rotate_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -5596,6 +6137,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Protect PDF: source file import (Phase 18)
@@ -5687,6 +6229,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     def _on_protect_clear_clicked(self) -> None:
         """Resets password/confirm-password (and the permission
@@ -5907,6 +6450,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Unlock PDF: source file import (Phase 19)
@@ -6011,6 +6555,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     def _on_unlock_clear_clicked(self) -> None:
         """Resets the password field but keeps the selected source PDF
@@ -6193,6 +6738,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Add Page Numbers: source file import (Phase 20)
@@ -6283,6 +6829,7 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
     # ------------------------------------------------------------------
     # Add Page Numbers: the actual operation (Phase 20)
@@ -6460,6 +7007,290 @@ class MainWindow:
         self._update_protect_controls_state()
         self._update_unlock_controls_state()
         self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
+
+
+    # ------------------------------------------------------------------
+    # Add Watermark: source file import (Phase 21)
+    # ------------------------------------------------------------------
+
+    def _on_watermark_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.watermark_status_var.set("Status: Ready")
+            return
+
+        self._start_watermark_import(path)
+
+    def _start_watermark_import(self, path: Path) -> None:
+        self._watermark_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.watermark_status_var.set("Status: Validating file...")
+        self.watermark_progress_bar.configure(mode="indeterminate")
+        self.watermark_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._watermark_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_watermark_import_queue)
+
+    def _watermark_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls pdf_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly.
+        """
+        try:
+            info = pdf_engine.get_pdf_info(path)
+            self._watermark_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._watermark_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._watermark_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_watermark_import_queue(self) -> None:
+        try:
+            result = self._watermark_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_watermark_import_queue)
+            return
+        self._apply_watermark_import_result(result)
+
+    def _apply_watermark_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.watermark_progress_bar.stop()
+        self.watermark_progress_bar.configure(mode="determinate", value=0)
+        self._watermark_import_in_progress = False
+
+        if result["success"]:
+            self.watermark_source = models.PDFFile(**result["info"])
+            self._update_watermark_source_label()
+            self.watermark_status_var.set(
+                f"Status: Selected '{self.watermark_source.name}'."
+            )
+        else:
+            self.watermark_source = None
+            self._update_watermark_source_label()
+            self.watermark_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # See the matching comment in _apply_import_results() -- Add
+        # Watermark's import shares the same app-wide busy lock, so its
+        # completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+        self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
+
+    # ------------------------------------------------------------------
+    # Add Watermark: the actual operation (Phase 21)
+    # ------------------------------------------------------------------
+
+    def _on_watermark_execute_clicked(self) -> None:
+        """Like Unlock PDF (Phase 19) and Add Page Numbers (Phase 20),
+        and unlike every Save-As-dialog tool (Remove/Extract/Organize/
+        Rotate/Protect), this one never opens a native Save As dialog --
+        per the Phase 21 spec, Add Watermark's output path is fully
+        automatic and collision-safe
+        (file_manager.generate_watermarked_output_path(), writing next
+        to the source). See that function's own docstring for why.
+
+        Every option is re-validated here, on the main thread, before
+        the worker starts -- the button is already disabled for an
+        invalid configuration (see _update_watermark_feedback()), so
+        this is defense in depth against a direct programmatic call.
+        """
+        if self._any_operation_in_progress():
+            return
+        if self.watermark_source is None:
+            return  # defensive; button should be disabled without a source
+
+        page_count = self.watermark_source.page_count or 0
+
+        if self.watermark_all_pages_var.get():
+            page_indices = None  # None = every page, resolved by the engine
+        else:
+            selection = self.watermark_selection_var.get()
+            try:
+                page_indices = watermark_engine.resolve_pages_to_watermark(
+                    selection, page_count,
+                )
+            except split_engine.PageRangeError as exc:
+                self.watermark_error_var.set(str(exc))
+                self.watermark_status_var.set(f"Status: {exc}")
+                messagebox.showerror(
+                    title="Invalid Page Selection", message=str(exc),
+                    parent=self.root,
+                )
+                return
+
+        try:
+            text = watermark_engine.validate_text(self.watermark_text_var.get())
+            font_size = watermark_engine.validate_font_size(
+                self.watermark_font_size_var.get()
+            )
+            opacity = watermark_engine.validate_opacity(
+                self.watermark_opacity_var.get()
+            )
+            rotation = watermark_engine.validate_rotation(
+                self.watermark_rotation_var.get()
+            )
+            position = watermark_engine.validate_position(
+                self.watermark_position_var.get()
+            )
+            color = self._resolve_watermark_color()
+        except watermark_engine.WatermarkOptionsError as exc:
+            self.watermark_error_var.set(str(exc))
+            self.watermark_status_var.set(f"Status: {exc}")
+            messagebox.showerror(
+                title="Invalid Option", message=str(exc), parent=self.root,
+            )
+            return
+
+        output_path = file_manager.generate_watermarked_output_path(
+            self.watermark_source.path, self.watermark_source.path.parent,
+        )
+
+        self._start_watermark(
+            self.watermark_source.path, output_path, page_indices, text,
+            position, font_size, opacity, rotation, color,
+        )
+
+    def _start_watermark(
+        self, source_path: Path, output_path: Path,
+        page_indices: Optional[List[int]], text: str, position: str,
+        font_size: float, opacity: float, rotation: int, color,
+    ) -> None:
+        self.watermark_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.watermark_status_var.set("Status: Adding watermark...")
+        self.watermark_progress_bar.configure(mode="indeterminate")
+        self.watermark_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._watermark_worker,
+            args=(
+                source_path, output_path, page_indices, text, position,
+                font_size, opacity, rotation, color,
+            ),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_watermark_queue)
+
+    def _watermark_worker(
+        self, source_path: Path, output_path: Path,
+        page_indices: Optional[List[int]], text: str, position: str,
+        font_size: float, opacity: float, rotation: int, color,
+    ) -> None:
+        """Runs on a background thread. Calls
+        watermark_engine.add_watermark() directly. Must not touch any
+        tkinter widget; only the thread-safe queue is used to report
+        back.
+        """
+        def report(message: str) -> None:
+            self._watermark_queue.put({"type": "progress", "message": message})
+
+        try:
+            result_path = watermark_engine.add_watermark(
+                source_path, output_path, page_indices,
+                text=text, position=position, font_size=font_size,
+                opacity=opacity, rotation=rotation, color=color,
+                progress_callback=report,
+            )
+            self._watermark_queue.put({
+                "type": "done", "success": True,
+                "output_path": result_path, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._watermark_queue.put({
+                "type": "done", "success": False,
+                "output_path": None, "error": str(exc),
+            })
+        except Exception:
+            self._watermark_queue.put({
+                "type": "done", "success": False, "output_path": None,
+                "error": "An unexpected error occurred while adding the watermark.",
+            })
+
+    def _poll_watermark_queue(self) -> None:
+        try:
+            while True:
+                item = self._watermark_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.watermark_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_watermark_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_watermark_queue)
+
+    def _apply_watermark_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.watermark_progress_bar.stop()
+        self.watermark_progress_bar.configure(mode="determinate", value=0)
+
+        self.watermark_in_progress = False
+
+        if item["success"]:
+            output_path = item["output_path"]
+            self.watermark_status_var.set(
+                f"Status: Watermark added successfully. Saved to "
+                f"'{output_path.name}'."
+            )
+            # A completed operation has fully consumed its source,
+            # mirroring every other tool's own post-completion behavior:
+            # clear it so the workspace returns to its non-file-selected
+            # initial state. Must happen before
+            # _update_watermark_controls_state() below so ADD WATERMARK
+            # correctly goes back to "disabled" (it depends on
+            # self.watermark_source). The watermark's own settings (text,
+            # position, ...) are deliberately kept, so watermarking
+            # several files in a row with the same look is one click each.
+            self.watermark_source = None
+            self._update_watermark_source_label()
+            self.watermark_selection_var.set("")
+        else:
+            self.watermark_status_var.set("Status: Add Watermark failed.")
+            messagebox.showerror(
+                title="Add Watermark Failed", message=item["error"],
+                parent=self.root,
+            )
+
+        self._update_button_states()
+        # See the matching comment in _apply_import_results() -- Add
+        # Watermark shares the same app-wide busy lock, so its
+        # completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+        self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
 
 
 def run() -> None:
