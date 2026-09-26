@@ -55,29 +55,29 @@ def test_tool_is_immutable():
 # Registry contents
 # ---------------------------------------------------------------------------
 
-def test_merge_compress_split_remove_extract_organize_rotate_protect_unlock_and_page_numbers_are_the_available_tools():
+def test_all_eleven_tools_are_available():
     """Phase 13 made Split PDF the second real, working tool; Phase 14
     made Remove Pages the third; Phase 15 made Extract Pages the fourth;
     Phase 16 made Organize Pages the fifth; Phase 17 made Rotate the
     sixth; Phase 18 made Protect PDF the seventh; Phase 19 made Unlock
     PDF the eighth; Phase 20 made Add Page Numbers the ninth; Phase 21
-    makes Add Watermark the tenth. Every other future tool remains
-    coming_soon until its own phase.
+    made Add Watermark the tenth; Phase 22 makes Images \u2192 PDF the
+    eleventh and, for now, last -- there is no remaining coming_soon
+    tool in the registry.
     """
     available_ids = {t.id for t in tool_registry.get_all_tools() if t.is_available}
     assert available_ids == {
         "merge_compress", "split", "remove_pages", "extract_pages",
         "organize_pages", "rotate", "protect", "unlock", "page_numbers",
-        "watermark",
+        "watermark", "images_to_pdf",
     }
 
 
-def test_one_future_tool_is_registered_as_coming_soon():
-    expected_ids = {"images_to_pdf"}
+def test_no_tool_is_registered_as_coming_soon_anymore():
     coming_soon_ids = {
         t.id for t in tool_registry.get_all_tools() if not t.is_available
     }
-    assert coming_soon_ids == expected_ids
+    assert coming_soon_ids == set()
 
 
 def test_registry_has_exactly_eleven_tools():
@@ -303,3 +303,21 @@ def test_watermark_keeps_its_position_in_registry_order():
     ids = [t.id for t in tool_registry.get_all_tools()]
     assert ids.index("page_numbers") + 1 == ids.index("watermark")
     assert ids.index("watermark") + 1 == ids.index("images_to_pdf")
+
+
+def test_images_to_pdf_tool_specifically_registered():
+    tool = tool_registry.get_tool("images_to_pdf")
+    assert tool is not None
+    assert tool.name == "Images \u2192 PDF"
+    assert tool.description == "Combine one or more images into a new PDF file."
+    assert tool.status == STATUS_AVAILABLE
+    assert tool.is_available
+    # Id and name are unchanged from the pre-existing placeholder --
+    # Phase 22 only flips status from coming_soon to available.
+    assert tool.category == "create"
+
+
+def test_images_to_pdf_keeps_its_registry_position_after_watermark():
+    ids = [t.id for t in tool_registry.get_all_tools()]
+    assert ids.index("watermark") + 1 == ids.index("images_to_pdf")
+    assert ids.index("images_to_pdf") == len(ids) - 1

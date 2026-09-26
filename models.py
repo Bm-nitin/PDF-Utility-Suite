@@ -38,6 +38,39 @@ class PDFFile:
 
 
 @dataclass
+class ImageFile:
+    """Represents a single imported image, for the Images -> PDF tool
+    (Phase 22). Deliberately NOT reused as/merged with PDFFile above --
+    an image has no page_count or is_encrypted, and has pixel
+    dimensions a PDF file doesn't. Two ImageFile instances for the same
+    path are two distinct objects (this dataclass has no identity or
+    equality logic of its own beyond Python's default), which is what
+    lets the same image be selected twice and produce two output PDF
+    pages -- see images_to_pdf_engine.py's module docstring.
+
+    `width`/`height` are the image's own pixel dimensions, read once at
+    import time (images_to_pdf_engine.get_image_info()); like
+    PDFFile.page_count, they are never guessed.
+    """
+
+    path: Path
+    name: str
+    size: int
+    width: Optional[int] = None
+    height: Optional[int] = None
+
+    @property
+    def size_display(self) -> str:
+        return format_file_size(self.size)
+
+    @property
+    def dimensions_display(self) -> str:
+        if self.width is None or self.height is None:
+            return "?"
+        return f"{self.width}\u00d7{self.height}"
+
+
+@dataclass
 class AppState:
     """Holds the full mutable state of the application at runtime."""
 

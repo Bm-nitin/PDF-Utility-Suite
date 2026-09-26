@@ -150,7 +150,7 @@ IMAGES_TO_PDF = Tool(
     id="images_to_pdf",
     name="Images \u2192 PDF",
     description="Combine one or more images into a new PDF file.",
-    status=STATUS_COMING_SOON,
+    status=STATUS_AVAILABLE,
     category="create",
 )
 

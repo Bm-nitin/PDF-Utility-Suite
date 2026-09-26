@@ -77,6 +77,41 @@ def select_pdf_files(parent=None) -> List[Path]:
     return [Path(p) for p in paths]
 
 
+def select_image_files(parent=None) -> List[Path]:
+    """Open the native multi-select Open dialog, restricted to image
+    files -- the Images -> PDF (Phase 22) analogue of select_pdf_files()
+    above, following the exact same "one filter, no All-files fallback"
+    convention so the dialog itself steers the user toward valid
+    selections.
+
+    The extension list here (PNG/JPEG/BMP/TIFF/WEBP) is deliberately
+    duplicated from, rather than imported from,
+    images_to_pdf_engine.SUPPORTED_EXTENSIONS -- file_manager.py never
+    imports any *_engine module (see this module's own docstring: it
+    only ever hands back paths/dialog results, and no engine module is
+    a dependency of it), exactly the same layering
+    select_pdf_files()/save_pdf_file() already keep with pdf_engine.
+    tests/test_images_to_pdf_engine.py asserts the two lists stay in
+    sync so this duplication can't silently drift.
+
+    As defense in depth -- a user can still type an arbitrary filename
+    into the dialog's filename box -- images_to_pdf_engine re-validates
+    every selected file (extension AND actual decodability) before it is
+    added to the list.
+
+    Returns an empty list if the user cancels -- a normal, expected
+    outcome, not an error.
+    """
+    paths = filedialog.askopenfilenames(
+        parent=parent,
+        title="Select Image Files",
+        filetypes=[
+            ("Image files", "*.png *.jpg *.jpeg *.bmp *.tif *.tiff *.webp"),
+        ],
+    )
+    return [Path(p) for p in paths]
+
+
 def select_single_pdf_file(parent=None) -> Optional[Path]:
     """Open the native SINGLE-file Open dialog, restricted to PDFs.
 

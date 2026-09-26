@@ -24,6 +24,32 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import tool_registry
 
 
+# Phase 22 made Images \u2192 PDF (the last remaining coming_soon tool)
+# available, so the registry now contains no coming_soon tool at all --
+# there is no longer any real tool id the tests below can select to
+# reach the generic placeholder. Rather than weaken or delete this
+# coverage, a single synthetic Tool with STATUS_COMING_SOON is patched
+# into tool_registry.get_tool() under a fictitious id for exactly the
+# tests that need to exercise that placeholder path; every other test
+# in this file uses only real, registered tool ids.
+_FAKE_COMING_SOON_TOOL = tool_registry.Tool(
+    id="_fake_coming_soon_tool_for_tests",
+    name="Fake Future Tool",
+    description="A synthetic placeholder tool used only by this test file.",
+    status=tool_registry.STATUS_COMING_SOON,
+    category="create",
+)
+
+
+_real_get_tool = tool_registry.get_tool
+
+
+def _get_tool_with_one_fake_coming_soon(tool_id):
+    if tool_id == _FAKE_COMING_SOON_TOOL.id:
+        return _FAKE_COMING_SOON_TOOL
+    return _real_get_tool(tool_id)
+
+
 @pytest.fixture
 def pdf_files(tmp_path):
     def make(path, pages=1):
@@ -69,57 +95,64 @@ def test_nav_sidebar_lists_every_registered_tool(window):
 # ---------------------------------------------------------------------------
 
 def test_selecting_a_coming_soon_tool_shows_placeholder(window):
-    # Uses "images_to_pdf" rather than "split", "remove_pages",
-    # "extract_pages", "organize_pages", "rotate", "protect", "unlock",
-    # "page_numbers", or "watermark" -- Phase 13 made Split, Phase 14
-    # made Remove Pages, Phase 15 made Extract Pages, Phase 16 made
-    # Organize Pages, Phase 17 made Rotate, Phase 18 made Protect PDF,
-    # Phase 19 made Unlock PDF, Phase 20 made Add Page Numbers, and
-    # Phase 21 made Add Watermark real, available tools with their own
-    # dedicated workspaces, so none of them is a valid example of the
-    # generic coming-soon placeholder anymore.
-    window._select_tool("images_to_pdf")
-    window.root.update()
+    # Phase 22 made "images_to_pdf" (the last previously coming_soon
+    # tool) available too -- so a synthetic tool id is patched in for
+    # this and the next two tests; see _FAKE_COMING_SOON_TOOL above.
+    # Phase 13 made Split, Phase 14 made Remove Pages, Phase 15 made
+    # Extract Pages, Phase 16 made Organize Pages, Phase 17 made
+    # Rotate, Phase 18 made Protect PDF, Phase 19 made Unlock PDF,
+    # Phase 20 made Add Page Numbers, Phase 21 made Add Watermark, and
+    # Phase 22 made Images \u2192 PDF real, available tools with their
+    # own dedicated workspaces, so none of them is a valid example of
+    # the generic coming-soon placeholder anymore.
+    with patch.object(
+        tool_registry, "get_tool", side_effect=_get_tool_with_one_fake_coming_soon,
+    ):
+        window._select_tool(_FAKE_COMING_SOON_TOOL.id)
+        window.root.update()
 
-    assert window.current_tool_id == "images_to_pdf"
-    assert not window.merge_compress_view.winfo_ismapped()
-    assert window.coming_soon_view.winfo_ismapped()
-    assert window.coming_soon_title_label.cget("text") == "Images \u2192 PDF"
+        assert window.current_tool_id == _FAKE_COMING_SOON_TOOL.id
+        assert not window.merge_compress_view.winfo_ismapped()
+        assert window.coming_soon_view.winfo_ismapped()
+        assert window.coming_soon_title_label.cget("text") == "Fake Future Tool"
 
     window._select_tool("merge_compress")
     window.root.update()
 
 
 def test_selecting_an_available_tool_after_a_coming_soon_tool_replaces_placeholder(window):
-    # Phase 21 made "watermark" available, leaving "images_to_pdf" as
-    # the only coming-soon tool -- so the original "switch between two
-    # different placeholders" scenario can no longer be exercised
-    # directly. This covers the equivalent transition instead: the
-    # placeholder must give way to the newly selected tool's own
-    # dedicated workspace, and come back for the coming-soon tool.
-    window._select_tool("images_to_pdf")
-    window.root.update()
-    assert window.coming_soon_title_label.cget("text") == "Images \u2192 PDF"
+    # Covers the transition in both directions: the placeholder must
+    # give way to a newly selected tool's own dedicated workspace, and
+    # come back when a coming-soon tool is reselected.
+    with patch.object(
+        tool_registry, "get_tool", side_effect=_get_tool_with_one_fake_coming_soon,
+    ):
+        window._select_tool(_FAKE_COMING_SOON_TOOL.id)
+        window.root.update()
+        assert window.coming_soon_title_label.cget("text") == "Fake Future Tool"
 
-    window._select_tool("watermark")
-    window.root.update()
-    assert window.watermark_view.winfo_ismapped()
-    assert not window.coming_soon_view.winfo_ismapped()
+        window._select_tool("watermark")
+        window.root.update()
+        assert window.watermark_view.winfo_ismapped()
+        assert not window.coming_soon_view.winfo_ismapped()
 
-    window._select_tool("images_to_pdf")
-    window.root.update()
-    assert window.coming_soon_view.winfo_ismapped()
-    assert not window.watermark_view.winfo_ismapped()
-    assert window.coming_soon_title_label.cget("text") == "Images \u2192 PDF"
+        window._select_tool(_FAKE_COMING_SOON_TOOL.id)
+        window.root.update()
+        assert window.coming_soon_view.winfo_ismapped()
+        assert not window.watermark_view.winfo_ismapped()
+        assert window.coming_soon_title_label.cget("text") == "Fake Future Tool"
 
     window._select_tool("merge_compress")
     window.root.update()
 
 
 def test_selecting_merge_compress_after_a_coming_soon_tool_restores_workspace(window):
-    window._select_tool("images_to_pdf")
-    window.root.update()
-    assert not window.merge_compress_view.winfo_ismapped()
+    with patch.object(
+        tool_registry, "get_tool", side_effect=_get_tool_with_one_fake_coming_soon,
+    ):
+        window._select_tool(_FAKE_COMING_SOON_TOOL.id)
+        window.root.update()
+        assert not window.merge_compress_view.winfo_ismapped()
 
     window._select_tool("merge_compress")
     window.root.update()
@@ -159,17 +192,18 @@ def test_selecting_unknown_tool_id_is_a_safe_noop(window):
 
 
 def test_selecting_unknown_tool_id_while_on_a_coming_soon_tool_is_a_noop(window):
-    # "images_to_pdf" rather than "split"/"extract_pages"/"organize_pages"/
-    # "rotate"/"protect"/"unlock"/"page_numbers"/"watermark" -- see the
-    # note in test_selecting_a_coming_soon_tool_shows_placeholder above.
-    window._select_tool("images_to_pdf")
-    window.root.update()
+    # See _FAKE_COMING_SOON_TOOL above for why a synthetic id is used.
+    with patch.object(
+        tool_registry, "get_tool", side_effect=_get_tool_with_one_fake_coming_soon,
+    ):
+        window._select_tool(_FAKE_COMING_SOON_TOOL.id)
+        window.root.update()
 
-    window._select_tool("totally_bogus_id")
-    window.root.update()
+        window._select_tool("totally_bogus_id")
+        window.root.update()
 
-    assert window.current_tool_id == "images_to_pdf"
-    assert window.coming_soon_view.winfo_ismapped()
+        assert window.current_tool_id == _FAKE_COMING_SOON_TOOL.id
+        assert window.coming_soon_view.winfo_ismapped()
 
     window._select_tool("merge_compress")
     window.root.update()

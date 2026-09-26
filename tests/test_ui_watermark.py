@@ -1679,11 +1679,19 @@ def test_settings_and_source_survive_switching_away_and_back(window, watermark_s
     assert _state(window.watermark_button) == "normal"
 
 
-def test_coming_soon_placeholder_still_works_for_images_to_pdf(window):
+def test_images_to_pdf_is_now_available_not_coming_soon(window):
+    # Phase 22 made "images_to_pdf" a real, available tool with its own
+    # workspace -- this test used to be about the coming-soon
+    # placeholder; that placeholder path is now covered instead via a
+    # synthetic tool in test_phase12_tool_navigation.py.
     window._select_tool("images_to_pdf")
     window.root.update()
-    assert window.coming_soon_view.winfo_ismapped()
+    assert window.images_to_pdf_view.winfo_ismapped()
+    assert not window.coming_soon_view.winfo_ismapped()
     assert not window.watermark_view.winfo_ismapped()
+
+    window._select_tool("watermark")
+    window.root.update()
 
 
 # ---------------------------------------------------------------------------
