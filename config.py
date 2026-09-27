@@ -13,7 +13,7 @@ from pathlib import Path
 # Application identity
 # ---------------------------------------------------------------------------
 
-APP_NAME = "PDF Merger & Compressor"
+APP_NAME = "PDF Utilities Application"
 APP_VERSION = "1.0.0"
 
 # ---------------------------------------------------------------------------

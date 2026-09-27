@@ -154,6 +154,23 @@ IMAGES_TO_PDF = Tool(
     category="create",
 )
 
+# Phase 23 note: the project brief describing this phase said a
+# "PDF -> Images placeholder" already existed in this registry -- it
+# did not (there was no coming_soon entry for this tool at all before
+# this phase). Rather than silently inventing a history that didn't
+# happen, this entry is added directly here, available from the start,
+# following the exact same id/name/category conventions every other
+# entry in this file already does. "pdf_to_images" was chosen as its id
+# -- the direct mirror of "images_to_pdf" above -- since no prior id
+# needed preserving.
+PDF_TO_IMAGES = Tool(
+    id="pdf_to_images",
+    name="PDF \u2192 Images",
+    description="Render the pages of a PDF as PNG or JPEG image files.",
+    status=STATUS_AVAILABLE,
+    category="create",
+)
+
 _ALL_TOOLS: List[Tool] = [
     MERGE_COMPRESS,
     SPLIT,
@@ -166,6 +183,7 @@ _ALL_TOOLS: List[Tool] = [
     PAGE_NUMBERS,
     WATERMARK,
     IMAGES_TO_PDF,
+    PDF_TO_IMAGES,
 ]
 
 # Fail loudly and immediately at import time if a future edit ever

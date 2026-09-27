@@ -285,23 +285,61 @@ def sanitize_windows_filename(name: str) -> str:
     return sanitized
 
 
-def _find_collision_free_path(output_dir: Path, base_name: str) -> Path:
-    """Shared collision-avoidance logic: try "<base_name>.pdf" first,
-    then "<base_name> (1).pdf", " (2)", etc., until a path that doesn't
-    currently exist is found. Used by both generate_compressed_output_path()
-    and generate_split_output_path() (Phase 13) so the naming/collision
-    rule lives in exactly one place.
+def _find_collision_free_path_with_extension(
+    output_dir: Path, base_name: str, extension: str,
+    exclude: Optional[set] = None,
+) -> Path:
+    """The generic form of the collision-avoidance logic below: try
+    "<base_name><extension>" first, then "<base_name> (1)<extension>",
+    " (2)", etc., until a path that doesn't currently exist on disk AND
+    isn't in `exclude` is found. `extension` must include the leading
+    dot (e.g. ".png").
+
+    `exclude`, when given, is checked in addition to (not instead of)
+    the filesystem: it lets a caller building several output paths in
+    one batch -- before any of them exist on disk yet -- avoid handing
+    out the same "free" name twice. pdf_to_images_engine.py (Phase 23)
+    is the one caller that needs this, for a page selection that
+    renders the same PDF page more than once (e.g. "1-3,2-4"): without
+    `exclude`, both would independently see "document_page_002.png" as
+    unclaimed and collide with each other before either file is
+    written. Every other caller in this module leaves `exclude` at its
+    default of None, which reduces to exactly the original,
+    filesystem-only behavior.
+
+    _find_collision_free_path() (PDF-only, used by every *_engine.py's
+    single-PDF-output naming) is a thin wrapper around this, added in
+    Phase 23 so PDF -> Images' own multi-file, extension-varying output
+    (generate_image_output_path() below) can share the exact same
+    counting rule without duplicating it -- the wrapper exists rather
+    than switching every existing caller over to pass ".pdf" explicitly,
+    so none of those call sites need to change.
     """
-    candidate = output_dir / ensure_pdf_extension(base_name)
-    if not candidate.exists():
+    exclude = exclude or set()
+
+    candidate = output_dir / f"{base_name}{extension}"
+    if not candidate.exists() and candidate not in exclude:
         return candidate
 
     counter = 1
     while True:
-        candidate = output_dir / ensure_pdf_extension(f"{base_name} ({counter})")
-        if not candidate.exists():
+        candidate = output_dir / f"{base_name} ({counter}){extension}"
+        if not candidate.exists() and candidate not in exclude:
             return candidate
         counter += 1
+
+
+def _find_collision_free_path(output_dir: Path, base_name: str) -> Path:
+    """Shared collision-avoidance logic: try "<base_name>.pdf" first,
+    then "<base_name> (1).pdf", " (2)", etc., until a path that doesn't
+    currently exist is found. Used by generate_compressed_output_path(),
+    generate_split_output_path(), and every other single-PDF-output
+    generate_*_output_path() helper in this module, so the naming/
+    collision rule lives in exactly one place. `base_name` is always a
+    bare stem (+ suffix) with no extension of its own -- every existing
+    caller already follows that convention.
+    """
+    return _find_collision_free_path_with_extension(output_dir, base_name, ".pdf")
 
 
 def generate_compressed_output_path(input_path: Path, output_dir: Path) -> Path:
@@ -349,6 +387,35 @@ def generate_split_output_path(source_path: Path, output_dir: Path, suffix: str)
 
     stem = sanitize_windows_filename(source_path.stem)
     return _find_collision_free_path(output_dir, f"{stem}{suffix}")
+
+
+def generate_image_output_path(
+    source_path: Path, output_dir: Path, suffix: str, extension: str,
+    exclude: Optional[set] = None,
+) -> Path:
+    """Generate a collision-safe destination path for one rendered page
+    image (Phase 23, PDF -> Images), following the exact same naming/
+    collision pattern as generate_split_output_path() above --
+    "<stem><suffix><extension>", auto-incrementing with " (1)", " (2)",
+    etc. if that name is already taken. Never returns a path that
+    already exists on disk, nor one already in `exclude` -- see
+    _find_collision_free_path_with_extension()'s own docstring for why
+    a batch of same-named-page renders needs that second check too.
+
+    `suffix` is produced by pdf_to_images_engine.py (e.g. "_page_003")
+    exactly the way split_engine.py owns its own "_001"/"_001_pages_1-3"
+    suffixes for generate_split_output_path() -- this function only
+    owns filename sanitization, extension, and collision avoidance, not
+    the page-numbering scheme itself. `extension` must include the
+    leading dot (e.g. ".png", ".jpg").
+    """
+    source_path = Path(source_path)
+    output_dir = Path(output_dir)
+
+    stem = sanitize_windows_filename(source_path.stem)
+    return _find_collision_free_path_with_extension(
+        output_dir, f"{stem}{suffix}", extension, exclude=exclude,
+    )
 
 
 def generate_unlocked_output_path(source_path: Path, output_dir: Path) -> Path:

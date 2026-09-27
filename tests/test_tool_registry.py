@@ -55,21 +55,21 @@ def test_tool_is_immutable():
 # Registry contents
 # ---------------------------------------------------------------------------
 
-def test_all_eleven_tools_are_available():
+def test_all_twelve_tools_are_available():
     """Phase 13 made Split PDF the second real, working tool; Phase 14
     made Remove Pages the third; Phase 15 made Extract Pages the fourth;
     Phase 16 made Organize Pages the fifth; Phase 17 made Rotate the
     sixth; Phase 18 made Protect PDF the seventh; Phase 19 made Unlock
     PDF the eighth; Phase 20 made Add Page Numbers the ninth; Phase 21
-    made Add Watermark the tenth; Phase 22 makes Images \u2192 PDF the
-    eleventh and, for now, last -- there is no remaining coming_soon
-    tool in the registry.
+    made Add Watermark the tenth; Phase 22 made Images \u2192 PDF the
+    eleventh; Phase 23 makes PDF \u2192 Images the twelfth -- there is
+    no coming_soon tool in the registry.
     """
     available_ids = {t.id for t in tool_registry.get_all_tools() if t.is_available}
     assert available_ids == {
         "merge_compress", "split", "remove_pages", "extract_pages",
         "organize_pages", "rotate", "protect", "unlock", "page_numbers",
-        "watermark", "images_to_pdf",
+        "watermark", "images_to_pdf", "pdf_to_images",
     }
 
 
@@ -80,8 +80,8 @@ def test_no_tool_is_registered_as_coming_soon_anymore():
     assert coming_soon_ids == set()
 
 
-def test_registry_has_exactly_eleven_tools():
-    assert len(tool_registry.get_all_tools()) == 11
+def test_registry_has_exactly_twelve_tools():
+    assert len(tool_registry.get_all_tools()) == 12
 
 
 def test_all_tool_ids_are_unique():
@@ -135,7 +135,7 @@ def test_get_all_tools_returns_a_copy_not_the_internal_list():
     tools = tool_registry.get_all_tools()
     tools.append(Tool(id="fake", name="Fake", description="d"))
     assert tool_registry.get_tool("fake") is None
-    assert len(tool_registry.get_all_tools()) == 11
+    assert len(tool_registry.get_all_tools()) == 12
 
 
 def test_get_tools_by_category():
@@ -320,4 +320,24 @@ def test_images_to_pdf_tool_specifically_registered():
 def test_images_to_pdf_keeps_its_registry_position_after_watermark():
     ids = [t.id for t in tool_registry.get_all_tools()]
     assert ids.index("watermark") + 1 == ids.index("images_to_pdf")
-    assert ids.index("images_to_pdf") == len(ids) - 1
+    # No longer the last entry as of Phase 23 -- see
+    # test_pdf_to_images_keeps_its_registry_position_after_images_to_pdf
+    # below for the tool that took over that position.
+    assert ids.index("images_to_pdf") == len(ids) - 2
+
+
+def test_pdf_to_images_tool_specifically_registered():
+    tool = tool_registry.get_tool("pdf_to_images")
+    assert tool is not None
+    assert tool.id == "pdf_to_images"
+    assert tool.name == "PDF \u2192 Images"
+    assert tool.description == "Render the pages of a PDF as PNG or JPEG image files."
+    assert tool.status == STATUS_AVAILABLE
+    assert tool.is_available
+    assert tool.category == "create"
+
+
+def test_pdf_to_images_keeps_its_registry_position_after_images_to_pdf():
+    ids = [t.id for t in tool_registry.get_all_tools()]
+    assert ids.index("images_to_pdf") + 1 == ids.index("pdf_to_images")
+    assert ids.index("pdf_to_images") == len(ids) - 1

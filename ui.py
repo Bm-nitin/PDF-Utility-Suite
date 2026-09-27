@@ -77,6 +77,7 @@ import models
 import organize_engine
 import page_numbers_engine
 import pdf_engine
+import pdf_to_images_engine
 import protect_engine
 import remove_pages_engine
 import rotate_engine
@@ -532,6 +533,45 @@ class MainWindow:
         self._images_to_pdf_queue: "queue.Queue[dict]" = queue.Queue()
         self.images_to_pdf_in_progress = False
 
+        # Phase 23: PDF -> Images's own state -- a single source, like
+        # Watermark/Page Numbers/Unlock (Phase 19-21), not an ordered
+        # list like Images -> PDF/Merge & Compress, since this tool
+        # renders pages OUT OF one PDF rather than combining several
+        # inputs into one. All-pages/selected-pages page selection
+        # mirrors Watermark's/Page Numbers' own toggle + range entry,
+        # reusing pdf_to_images_engine.resolve_pages_to_render() (in
+        # turn built on split_engine.parse_page_ranges(), exactly like
+        # every other page-selecting tool in this project). Format,
+        # DPI, and JPEG quality all use the engine's own stable
+        # identifiers/values as the variable's value -- never a UI
+        # display label -- exactly like Watermark's position/color
+        # variables do.
+        self.pdf_to_images_source: Optional[models.PDFFile] = None
+        self.pdf_to_images_all_pages_var = tk.BooleanVar(value=True)
+        self.pdf_to_images_selection_var = tk.StringVar(value="")
+        self.pdf_to_images_format_var = tk.StringVar(
+            value=pdf_to_images_engine.DEFAULT_FORMAT
+        )
+        self.pdf_to_images_dpi_var = tk.StringVar(
+            value=f"{pdf_to_images_engine.DEFAULT_DPI:g}"
+        )
+        self.pdf_to_images_jpeg_quality_var = tk.StringVar(
+            value=str(pdf_to_images_engine.DEFAULT_JPEG_QUALITY)
+        )
+        # The folder chosen via file_manager.select_output_folder() --
+        # unlike every Save-As-dialog tool, this is picked ONCE (not on
+        # every click of Convert to Images) and shown in the workspace,
+        # since a multi-file batch output needs a persistent folder, not
+        # a per-run prompt for a single filename. See
+        # _on_pdf_to_images_choose_folder_clicked()'s own docstring.
+        self.pdf_to_images_output_dir: Optional[Path] = None
+        self.pdf_to_images_status_var = tk.StringVar(value="Status: Ready")
+
+        self._pdf_to_images_import_queue: "queue.Queue[dict]" = queue.Queue()
+        self._pdf_to_images_import_in_progress = False
+        self._pdf_to_images_queue: "queue.Queue[dict]" = queue.Queue()
+        self.pdf_to_images_in_progress = False
+
         self._configure_window()
         self._configure_styles()
         self._build_layout()
@@ -702,6 +742,7 @@ class MainWindow:
         self._build_page_numbers_workspace(self.workspace_container)
         self._build_watermark_workspace(self.workspace_container)
         self._build_images_to_pdf_workspace(self.workspace_container)
+        self._build_pdf_to_images_workspace(self.workspace_container)
 
         self._select_tool(self.current_tool_id)
 
@@ -3805,6 +3846,356 @@ class MainWindow:
             f"Status: Cleared all images ({count} removed)."
         )
 
+    # ------------------------------------------------------------------
+    # PDF -> Images workspace (Phase 23)
+    # ------------------------------------------------------------------
+
+    def _build_pdf_to_images_workspace(self, parent: tk.Widget) -> None:
+        """Phase 23: the PDF -> Images tool's dedicated workspace.
+
+        Follows the same compact, single-source-tool shape as Extract/
+        Organize/Rotate/Protect/Unlock/Page Numbers/Watermark: its own
+        state, its own view frame, the same card/status/progress
+        styling. Page selection mirrors Watermark's/Page Numbers' own
+        All Pages/Selected Pages toggle exactly.
+
+        Unlike every auto-named-output tool since Unlock PDF (Phase 19)
+        and unlike Images -> PDF's Save-As-a-single-PDF dialog (Phase
+        22), this tool writes MULTIPLE files into a folder the person
+        picks once, up front, via file_manager.select_output_folder()
+        (already used by Compress-batch and Split) -- so the workspace
+        shows a persistent "Output Folder" field rather than opening a
+        dialog on every click of Convert to Images. See
+        _on_pdf_to_images_choose_folder_clicked()'s own docstring.
+        """
+        self.pdf_to_images_view = tk.Frame(parent, bg=COLOR_BG)
+        outer = self.pdf_to_images_view
+
+        header = tk.Frame(outer, bg=COLOR_BG)
+        header.pack(fill="x", pady=(0, 18))
+        tk.Label(
+            header, text="PDF \u2192 IMAGES", font=("Segoe UI", 19, "bold"),
+            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w")
+        tk.Label(
+            header,
+            text=(
+                "Render pages of a PDF as PNG or JPEG image files -- "
+                "locally, no upload."
+            ),
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w", pady=(2, 0))
+
+        def make_card(pady_inner: int = 14) -> tk.Frame:
+            card = tk.Frame(
+                outer, bg=COLOR_CARD,
+                highlightbackground=COLOR_BORDER, highlightthickness=1,
+            )
+            card.pack(fill="x", pady=(0, 16))
+            inner = tk.Frame(card, bg=COLOR_CARD)
+            inner.pack(fill="x", padx=18, pady=pady_inner)
+            return inner
+
+        def make_row_label(row: tk.Frame, text: str) -> None:
+            tk.Label(
+                row, text=text, width=14, anchor="w",
+                font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            ).pack(side="left")
+
+        # Source file card
+        source_inner = make_card(pady_inner=16)
+        self.pdf_to_images_select_btn = ttk.Button(
+            source_inner, text="Select PDF File", style="Primary.TButton",
+            command=self._on_pdf_to_images_select_file_clicked,
+        )
+        self.pdf_to_images_select_btn.pack(side="left")
+        self.pdf_to_images_source_label = tk.Label(
+            source_inner, text="No file selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.pdf_to_images_source_label.pack(side="left", padx=(16, 0))
+
+        # Page range card
+        range_inner = make_card()
+        tk.Label(
+            range_inner, text="Pages to Convert",
+            font=("Segoe UI", 11, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        self.pdf_to_images_all_pages_radio = ttk.Radiobutton(
+            range_inner, text="All pages", value=True,
+            variable=self.pdf_to_images_all_pages_var,
+            style="Compression.TRadiobutton",
+            command=self._update_pdf_to_images_mode_controls,
+        )
+        self.pdf_to_images_all_pages_radio.pack(anchor="w", pady=2)
+
+        selected_row = tk.Frame(range_inner, bg=COLOR_CARD)
+        selected_row.pack(fill="x", pady=2)
+        self.pdf_to_images_selected_pages_radio = ttk.Radiobutton(
+            selected_row, text="Selected pages:", value=False,
+            variable=self.pdf_to_images_all_pages_var,
+            style="Compression.TRadiobutton",
+            command=self._update_pdf_to_images_mode_controls,
+        )
+        self.pdf_to_images_selected_pages_radio.pack(side="left")
+        self.pdf_to_images_selection_entry = ttk.Entry(
+            selected_row, textvariable=self.pdf_to_images_selection_var, width=24,
+        )
+        self.pdf_to_images_selection_entry.pack(side="left", padx=(6, 0))
+
+        tk.Label(
+            range_inner,
+            text="Example: 1-3,5,8-10  (1-based, inclusive ranges)",
+            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+        ).pack(anchor="w", pady=(6, 0))
+
+        # Format / DPI / quality card
+        format_inner = make_card()
+        tk.Label(
+            format_inner, text="Image Settings", font=("Segoe UI", 11, "bold"),
+            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+        ).pack(anchor="w", pady=(0, 8))
+
+        format_row = tk.Frame(format_inner, bg=COLOR_CARD)
+        format_row.pack(fill="x", pady=(0, 8))
+        make_row_label(format_row, "Format:")
+        format_labels = {"png": "PNG", "jpeg": "JPEG"}
+        self.pdf_to_images_format_radios = {}
+        for fmt in pdf_to_images_engine.FORMAT_CHOICES:
+            radio = ttk.Radiobutton(
+                format_row, text=format_labels[fmt], value=fmt,
+                variable=self.pdf_to_images_format_var,
+                style="Compression.TRadiobutton",
+                command=self._update_pdf_to_images_format_controls,
+            )
+            radio.pack(side="left", padx=(0, 16))
+            self.pdf_to_images_format_radios[fmt] = radio
+
+        dpi_row = tk.Frame(format_inner, bg=COLOR_CARD)
+        dpi_row.pack(fill="x", pady=(0, 8))
+        make_row_label(dpi_row, "DPI:")
+        self.pdf_to_images_dpi_combo = ttk.Combobox(
+            dpi_row, textvariable=self.pdf_to_images_dpi_var,
+            values=[str(d) for d in pdf_to_images_engine.DPI_CHOICES],
+            state="normal", width=8,
+        )
+        self.pdf_to_images_dpi_combo.pack(side="left")
+        tk.Label(
+            dpi_row, text=f"(1\u2013{pdf_to_images_engine.MAX_DPI:g})",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left", padx=(6, 0))
+
+        self.pdf_to_images_quality_row = tk.Frame(format_inner, bg=COLOR_CARD)
+        self.pdf_to_images_quality_row.pack(fill="x")
+        make_row_label(self.pdf_to_images_quality_row, "JPEG Quality:")
+        self.pdf_to_images_quality_combo = ttk.Combobox(
+            self.pdf_to_images_quality_row,
+            textvariable=self.pdf_to_images_jpeg_quality_var,
+            values=[str(q) for q in pdf_to_images_engine.JPEG_QUALITY_CHOICES],
+            state="normal", width=8,
+        )
+        self.pdf_to_images_quality_combo.pack(side="left")
+        tk.Label(
+            self.pdf_to_images_quality_row, text="(1\u2013100)",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(side="left", padx=(6, 0))
+
+        # Output folder card
+        folder_inner = make_card(pady_inner=16)
+        self.pdf_to_images_folder_btn = ttk.Button(
+            folder_inner, text="Choose Output Folder",
+            style="Secondary.TButton",
+            command=self._on_pdf_to_images_choose_folder_clicked,
+        )
+        self.pdf_to_images_folder_btn.pack(side="left")
+        self.pdf_to_images_folder_label = tk.Label(
+            folder_inner, text="No output folder selected.",
+            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        )
+        self.pdf_to_images_folder_label.pack(side="left", padx=(16, 0))
+
+        # Live summary + validation message.
+        self.pdf_to_images_feedback_var = tk.StringVar(value="")
+        self.pdf_to_images_feedback_label = tk.Label(
+            outer, textvariable=self.pdf_to_images_feedback_var,
+            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            justify="left", anchor="w",
+        )
+        self.pdf_to_images_feedback_label.pack(fill="x", pady=(0, 4))
+
+        self.pdf_to_images_error_var = tk.StringVar(value="")
+        self.pdf_to_images_error_label = tk.Label(
+            outer, textvariable=self.pdf_to_images_error_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg="#c0392b",
+            justify="left", anchor="w", wraplength=520,
+        )
+        self.pdf_to_images_error_label.pack(fill="x", pady=(0, 10))
+
+        # Action
+        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper.pack(fill="x", pady=(0, 16))
+        self.pdf_to_images_button = ttk.Button(
+            action_wrapper, text="CONVERT TO IMAGES", style="Primary.TButton",
+            command=self._on_pdf_to_images_execute_clicked, state="disabled",
+        )
+        self.pdf_to_images_button.pack(fill="x", ipady=4)
+
+        # Status
+        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame.pack(fill="x")
+        self.pdf_to_images_status_label = tk.Label(
+            status_frame, textvariable=self.pdf_to_images_status_var,
+            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            anchor="w",
+        )
+        self.pdf_to_images_status_label.pack(fill="x", pady=(0, 6))
+        self.pdf_to_images_progress_bar = ttk.Progressbar(
+            status_frame, style="App.Horizontal.TProgressbar",
+            orient="horizontal", mode="determinate", value=0,
+        )
+        self.pdf_to_images_progress_bar.pack(fill="x")
+
+        for var in (
+            self.pdf_to_images_selection_var, self.pdf_to_images_format_var,
+            self.pdf_to_images_dpi_var, self.pdf_to_images_jpeg_quality_var,
+        ):
+            var.trace_add("write", self._on_pdf_to_images_option_changed)
+
+        self._update_pdf_to_images_mode_controls()
+        self._update_pdf_to_images_format_controls()
+        self._update_pdf_to_images_feedback()
+
+    def _on_pdf_to_images_option_changed(self, *_args) -> None:
+        self._update_pdf_to_images_feedback()
+
+    def _update_pdf_to_images_mode_controls(self) -> None:
+        """Only the range entry is interactive in "Selected pages" mode
+        -- mirrors _update_watermark_mode_controls()/
+        _update_page_numbers_mode_controls().
+        """
+        all_pages = self.pdf_to_images_all_pages_var.get()
+        self.pdf_to_images_selection_entry.configure(
+            state="disabled" if all_pages else "normal"
+        )
+        self._update_pdf_to_images_feedback()
+
+    def _update_pdf_to_images_format_controls(self) -> None:
+        """JPEG quality is only meaningful for JPEG output -- disabled
+        for PNG rather than hidden, so the workspace's layout doesn't
+        jump around when switching formats (same reasoning Watermark's
+        Custom-color row uses for its always-present swatch/Choose
+        button).
+        """
+        is_jpeg = self.pdf_to_images_format_var.get() == "jpeg"
+        self.pdf_to_images_quality_combo.configure(
+            state="normal" if is_jpeg else "disabled"
+        )
+        self._update_pdf_to_images_feedback()
+
+    def _update_pdf_to_images_feedback(self) -> None:
+        """The single place that keeps the pages/options summary, the
+        validation error message, and the CONVERT TO IMAGES button's
+        enabled state all in sync with the current configuration --
+        driven purely by pdf_to_images_engine's pure validation
+        functions (no rendering, no file I/O), so bad input is caught
+        before any worker starts.
+        """
+        self.pdf_to_images_error_var.set("")
+
+        if self.pdf_to_images_source is None:
+            self.pdf_to_images_feedback_var.set("Select a PDF file first.")
+            self.pdf_to_images_button.configure(state="disabled")
+            return
+
+        page_count = self.pdf_to_images_source.page_count or 0
+
+        if self.pdf_to_images_all_pages_var.get():
+            pages_summary = f"Pages: All ({page_count})"
+        else:
+            text = self.pdf_to_images_selection_var.get()
+            if not text.strip():
+                self.pdf_to_images_feedback_var.set("Enter pages to convert.")
+                self.pdf_to_images_button.configure(state="disabled")
+                return
+            try:
+                indices = pdf_to_images_engine.resolve_pages_to_render(
+                    text, page_count,
+                )
+            except split_engine.PageRangeError as exc:
+                self.pdf_to_images_error_var.set(str(exc))
+                self.pdf_to_images_feedback_var.set(f"Pages: {text.strip()}")
+                self.pdf_to_images_button.configure(state="disabled")
+                return
+            pages_summary = f"Pages: {text.strip()} ({len(indices)} image(s))"
+
+        try:
+            image_format = pdf_to_images_engine.validate_format(
+                self.pdf_to_images_format_var.get()
+            )
+            pdf_to_images_engine.validate_dpi(self.pdf_to_images_dpi_var.get())
+            if image_format == "jpeg":
+                pdf_to_images_engine.validate_jpeg_quality(
+                    self.pdf_to_images_jpeg_quality_var.get()
+                )
+        except pdf_to_images_engine.ImageOptionsError as exc:
+            self.pdf_to_images_error_var.set(str(exc))
+            self.pdf_to_images_feedback_var.set(pages_summary)
+            self.pdf_to_images_button.configure(state="disabled")
+            return
+
+        if self.pdf_to_images_output_dir is None:
+            self.pdf_to_images_feedback_var.set(
+                f"{pages_summary} -- choose an output folder."
+            )
+            self.pdf_to_images_button.configure(state="disabled")
+            return
+
+        self.pdf_to_images_feedback_var.set(
+            f"{pages_summary} -- ready to convert."
+        )
+        self.pdf_to_images_button.configure(
+            state="disabled" if self._any_operation_in_progress() else "normal"
+        )
+
+    def _update_pdf_to_images_controls_state(self) -> None:
+        """The single place that restores PDF -> Images' own controls
+        to their correct enabled state once no operation is running --
+        mirrors _update_watermark_controls_state().
+        """
+        self.pdf_to_images_select_btn.configure(state="normal")
+        self.pdf_to_images_all_pages_radio.configure(state="normal")
+        self.pdf_to_images_selected_pages_radio.configure(state="normal")
+        for radio in self.pdf_to_images_format_radios.values():
+            radio.configure(state="normal")
+        self.pdf_to_images_dpi_combo.configure(state="normal")
+        self.pdf_to_images_folder_btn.configure(state="normal")
+        self._update_pdf_to_images_mode_controls()
+        self._update_pdf_to_images_format_controls()
+        self._update_pdf_to_images_feedback()
+
+    def _update_pdf_to_images_source_label(self) -> None:
+        if self.pdf_to_images_source is None:
+            self.pdf_to_images_source_label.configure(text="No file selected.")
+        else:
+            self.pdf_to_images_source_label.configure(
+                text=(
+                    f"{self.pdf_to_images_source.name}  \u2014  "
+                    f"{self.pdf_to_images_source.page_count_display}, "
+                    f"{self.pdf_to_images_source.size_display}"
+                )
+            )
+
+    def _update_pdf_to_images_folder_label(self) -> None:
+        if self.pdf_to_images_output_dir is None:
+            self.pdf_to_images_folder_label.configure(
+                text="No output folder selected."
+            )
+        else:
+            self.pdf_to_images_folder_label.configure(
+                text=str(self.pdf_to_images_output_dir)
+            )
+
     def _select_tool(self, tool_id: str) -> None:
         """Switches the workspace to show the given tool. Unknown tool
         ids are a safe no-op -- selecting a tool that doesn't exist
@@ -3827,6 +4218,7 @@ class MainWindow:
         self.page_numbers_view.pack_forget()
         self.watermark_view.pack_forget()
         self.images_to_pdf_view.pack_forget()
+        self.pdf_to_images_view.pack_forget()
         self.coming_soon_view.pack_forget()
 
         if tool_id == "merge_compress":
@@ -3851,6 +4243,8 @@ class MainWindow:
             self.watermark_view.pack(fill="both", expand=True, padx=28, pady=24)
         elif tool_id == "images_to_pdf":
             self.images_to_pdf_view.pack(fill="both", expand=True, padx=28, pady=24)
+        elif tool_id == "pdf_to_images":
+            self.pdf_to_images_view.pack(fill="both", expand=True, padx=28, pady=24)
         else:
             # Covers every coming_soon tool, and defensively covers a
             # future "available" tool that doesn't have its own
@@ -4161,11 +4555,12 @@ class MainWindow:
         -- Phase 16, Rotate Pages' own controls -- Phase 17, Protect
         PDF's own controls -- Phase 18, Unlock PDF's own controls --
         Phase 19, Add Page Numbers' own controls -- Phase 20, Add
-        Watermark's own controls -- Phase 21, and Images -> PDF's own
-        controls -- Phase 22)
+        Watermark's own controls -- Phase 21, Images -> PDF's own
+        controls -- Phase 22, and PDF -> Images' own controls -- Phase
+        23)
         agrees on for "is anything running right now" -- the Phase 9
         "one consistent operation-state mechanism" requirement, now
-        covering all eleven tool workspaces. Every tool is treated as
+        covering all twelve tool workspaces. Every tool is treated as
         mutually exclusive with every other tool too (not just within
         itself): only one background PDF operation runs at a time
         app-wide, which is the simplest, safest policy and avoids two
@@ -4197,6 +4592,8 @@ class MainWindow:
             or self.watermark_in_progress
             or self._images_to_pdf_import_in_progress
             or self.images_to_pdf_in_progress
+            or self._pdf_to_images_import_in_progress
+            or self.pdf_to_images_in_progress
         )
 
     def _assert_main_thread(self) -> None:
@@ -4340,6 +4737,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
         self.status_var.set(f"Status: {self._summarize_import(added, skipped_duplicates, errors)}")
 
@@ -4663,6 +5061,25 @@ class MainWindow:
         for radio in self.images_to_pdf_page_size_radios.values():
             radio.configure(state=state)
 
+        # Phase 23: PDF -> Images' own controls follow the same busy
+        # flag too, for the same reason every other tool's do. The
+        # selection entry and JPEG-quality combobox are additionally
+        # gated on the page mode / selected format (see
+        # _update_pdf_to_images_mode_controls()/
+        # _update_pdf_to_images_format_controls()) -- setting them
+        # blanket-disabled here while busy is still correct, since those
+        # methods (called below when re-enabling) re-derive their real
+        # state afterward.
+        self.pdf_to_images_select_btn.configure(state=state)
+        self.pdf_to_images_all_pages_radio.configure(state=state)
+        self.pdf_to_images_selected_pages_radio.configure(state="disabled")
+        self.pdf_to_images_selection_entry.configure(state="disabled")
+        for radio in self.pdf_to_images_format_radios.values():
+            radio.configure(state=state)
+        self.pdf_to_images_dpi_combo.configure(state=state)
+        self.pdf_to_images_quality_combo.configure(state="disabled")
+        self.pdf_to_images_folder_btn.configure(state=state)
+
         if enabled:
             # Restore the file-count-dependent rules for the three
             # action buttons (a flat "enabled" isn't correct for them).
@@ -4705,7 +5122,7 @@ class MainWindow:
             self._update_page_numbers_controls_state()
             self._update_watermark_controls_state()
             self._update_images_to_pdf_controls_state()
-            self._update_images_to_pdf_controls_state()
+            self._update_pdf_to_images_controls_state()
         else:
             # Re-render immediately so per-row Remove/Move Up/Move Down
             # become disabled the instant an operation starts (they read
@@ -4722,6 +5139,7 @@ class MainWindow:
             self.page_numbers_button.configure(state="disabled")
             self.watermark_button.configure(state="disabled")
             self.images_to_pdf_button.configure(state="disabled")
+            self.pdf_to_images_button.configure(state="disabled")
 
     # ------------------------------------------------------------------
     # File list mutation (Phase 5: remove / reorder / clear)
@@ -4938,6 +5356,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -5163,6 +5582,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
         if result["success"]:
             output_path: Path = result["output_path"]
@@ -5207,6 +5627,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
         succeeded: List[dict] = result["succeeded"]
         failed: List[Tuple[str, str]] = result["failed"]
@@ -5369,6 +5790,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
         if item["success"]:
             result: dict = item["result"]
@@ -5491,6 +5913,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Split PDF: the actual split operation (Phase 13)
@@ -5657,6 +6080,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Remove Pages: source file import (Phase 14)
@@ -5749,6 +6173,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     def _on_remove_pages_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -5911,6 +6336,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Extract Pages: source file import (Phase 15)
@@ -6004,6 +6430,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     def _on_extract_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -6167,6 +6594,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: source file import (Phase 16)
@@ -6266,6 +6694,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Organize/Reorder Pages: the actual reorder operation (Phase 16)
@@ -6418,6 +6847,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Rotate Pages: source file import (Phase 17)
@@ -6517,6 +6947,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     def _on_rotate_clear_selection_clicked(self) -> None:
         if self._any_operation_in_progress():
@@ -6684,6 +7115,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Protect PDF: source file import (Phase 18)
@@ -6777,6 +7209,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     def _on_protect_clear_clicked(self) -> None:
         """Resets password/confirm-password (and the permission
@@ -6999,6 +7432,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Unlock PDF: source file import (Phase 19)
@@ -7105,6 +7539,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     def _on_unlock_clear_clicked(self) -> None:
         """Resets the password field but keeps the selected source PDF
@@ -7289,6 +7724,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Add Page Numbers: source file import (Phase 20)
@@ -7381,6 +7817,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Add Page Numbers: the actual operation (Phase 20)
@@ -7560,6 +7997,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
 
     # ------------------------------------------------------------------
@@ -7653,6 +8091,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
     # ------------------------------------------------------------------
     # Add Watermark: the actual operation (Phase 21)
@@ -7845,6 +8284,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
 
     # ------------------------------------------------------------------
@@ -7937,6 +8377,7 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
         parts = []
         if added:
@@ -8119,6 +8560,303 @@ class MainWindow:
         self._update_page_numbers_controls_state()
         self._update_watermark_controls_state()
         self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
+
+
+    # ------------------------------------------------------------------
+    # PDF -> Images: source file import (Phase 23)
+    # ------------------------------------------------------------------
+
+    def _on_pdf_to_images_select_file_clicked(self) -> None:
+        if self._any_operation_in_progress():
+            return
+
+        path = file_manager.select_single_pdf_file(parent=self.root)
+        if path is None:
+            self.pdf_to_images_status_var.set("Status: Ready")
+            return
+
+        self._start_pdf_to_images_import(path)
+
+    def _start_pdf_to_images_import(self, path: Path) -> None:
+        self._pdf_to_images_import_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.pdf_to_images_status_var.set("Status: Validating file...")
+        self.pdf_to_images_progress_bar.configure(mode="indeterminate")
+        self.pdf_to_images_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._pdf_to_images_import_worker, args=(path,), daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_pdf_to_images_import_queue)
+
+    def _pdf_to_images_import_worker(self, path: Path) -> None:
+        """Runs on a background thread. Only calls pdf_engine (pure
+        file-system work) and puts a plain dict on the thread-safe
+        queue -- never touches a tkinter widget directly.
+        """
+        try:
+            info = pdf_engine.get_pdf_info(path)
+            self._pdf_to_images_import_queue.put({
+                "success": True, "info": info, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._pdf_to_images_import_queue.put({
+                "success": False, "info": None, "error": str(exc),
+            })
+        except Exception:
+            self._pdf_to_images_import_queue.put({
+                "success": False, "info": None,
+                "error": "An unexpected error occurred while reading this file.",
+            })
+
+    def _poll_pdf_to_images_import_queue(self) -> None:
+        try:
+            result = self._pdf_to_images_import_queue.get_nowait()
+        except queue.Empty:
+            self.root.after(80, self._poll_pdf_to_images_import_queue)
+            return
+        self._apply_pdf_to_images_import_result(result)
+
+    def _apply_pdf_to_images_import_result(self, result: dict) -> None:
+        self._assert_main_thread()
+        self.pdf_to_images_progress_bar.stop()
+        self.pdf_to_images_progress_bar.configure(mode="determinate", value=0)
+        self._pdf_to_images_import_in_progress = False
+
+        if result["success"]:
+            self.pdf_to_images_source = models.PDFFile(**result["info"])
+            self._update_pdf_to_images_source_label()
+            self.pdf_to_images_status_var.set(
+                f"Status: Selected '{self.pdf_to_images_source.name}'."
+            )
+        else:
+            self.pdf_to_images_source = None
+            self._update_pdf_to_images_source_label()
+            self.pdf_to_images_status_var.set("Status: Could not read that file.")
+            messagebox.showerror(
+                title="Invalid PDF", message=result["error"], parent=self.root,
+            )
+
+        self._update_button_states()
+        # See the matching comment in _apply_import_results() -- PDF ->
+        # Images' import shares the same app-wide busy lock, so its
+        # completion must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+        self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
+        self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
+
+    # ------------------------------------------------------------------
+    # PDF -> Images: output folder selection (Phase 23)
+    # ------------------------------------------------------------------
+
+    def _on_pdf_to_images_choose_folder_clicked(self) -> None:
+        """Opens the native folder-selection dialog (file_manager.
+        select_output_folder(), already used by Compress-batch and
+        Split -- reused here rather than inventing a second one) and
+        remembers the choice in self.pdf_to_images_output_dir, shown in
+        the workspace, until the person picks a different one.
+
+        Unlike Images -> PDF's Save As dialog (opened fresh on every
+        click of Create PDF, because that tool produces exactly one new
+        file whose name is the one open question), this tool produces
+        MANY files -- the open question here is "which folder", asked
+        once, up front, not "what do I name each of N files".
+        """
+        if self._any_operation_in_progress():
+            return
+
+        folder = file_manager.select_output_folder(parent=self.root)
+        if folder is None:
+            return
+
+        self.pdf_to_images_output_dir = folder
+        self._update_pdf_to_images_folder_label()
+        self._update_pdf_to_images_feedback()
+
+    # ------------------------------------------------------------------
+    # PDF -> Images: the actual operation (Phase 23)
+    # ------------------------------------------------------------------
+
+    def _on_pdf_to_images_execute_clicked(self) -> None:
+        """Every option is re-validated here, on the main thread, before
+        the worker starts -- the button is already disabled for an
+        invalid configuration (see _update_pdf_to_images_feedback()), so
+        this is defense in depth against a direct programmatic call.
+        """
+        if self._any_operation_in_progress():
+            return
+        if self.pdf_to_images_source is None:
+            return  # defensive; button should be disabled without a source
+        if self.pdf_to_images_output_dir is None:
+            return  # defensive; button should be disabled without a folder
+
+        page_count = self.pdf_to_images_source.page_count or 0
+
+        if self.pdf_to_images_all_pages_var.get():
+            page_indices = None  # None = every page, resolved by the engine
+        else:
+            selection = self.pdf_to_images_selection_var.get()
+            try:
+                page_indices = pdf_to_images_engine.resolve_pages_to_render(
+                    selection, page_count,
+                )
+            except split_engine.PageRangeError as exc:
+                self.pdf_to_images_error_var.set(str(exc))
+                self.pdf_to_images_status_var.set(f"Status: {exc}")
+                messagebox.showerror(
+                    title="Invalid Page Selection", message=str(exc),
+                    parent=self.root,
+                )
+                return
+
+        try:
+            image_format = pdf_to_images_engine.validate_format(
+                self.pdf_to_images_format_var.get()
+            )
+            dpi = pdf_to_images_engine.validate_dpi(
+                self.pdf_to_images_dpi_var.get()
+            )
+            jpeg_quality = pdf_to_images_engine.DEFAULT_JPEG_QUALITY
+            if image_format == "jpeg":
+                jpeg_quality = pdf_to_images_engine.validate_jpeg_quality(
+                    self.pdf_to_images_jpeg_quality_var.get()
+                )
+        except pdf_to_images_engine.ImageOptionsError as exc:
+            self.pdf_to_images_error_var.set(str(exc))
+            self.pdf_to_images_status_var.set(f"Status: {exc}")
+            messagebox.showerror(
+                title="Invalid Option", message=str(exc), parent=self.root,
+            )
+            return
+
+        self._start_pdf_to_images(
+            self.pdf_to_images_source.path, self.pdf_to_images_output_dir,
+            page_indices, image_format, dpi, jpeg_quality,
+        )
+
+    def _start_pdf_to_images(
+        self, source_path: Path, output_dir: Path,
+        page_indices: Optional[List[int]], image_format: str, dpi: float,
+        jpeg_quality: int,
+    ) -> None:
+        self.pdf_to_images_in_progress = True
+        self._set_controls_enabled(False)
+
+        self.pdf_to_images_status_var.set("Status: Rendering pages...")
+        self.pdf_to_images_progress_bar.configure(mode="indeterminate")
+        self.pdf_to_images_progress_bar.start(12)
+
+        worker = threading.Thread(
+            target=self._pdf_to_images_worker,
+            args=(source_path, output_dir, page_indices, image_format, dpi, jpeg_quality),
+            daemon=True,
+        )
+        worker.start()
+        self.root.after(80, self._poll_pdf_to_images_queue)
+
+    def _pdf_to_images_worker(
+        self, source_path: Path, output_dir: Path,
+        page_indices: Optional[List[int]], image_format: str, dpi: float,
+        jpeg_quality: int,
+    ) -> None:
+        """Runs on a background thread. Calls
+        pdf_to_images_engine.render_pdf_to_images() directly. Must not
+        touch any tkinter widget; only the thread-safe queue is used to
+        report back.
+        """
+        def report(message: str) -> None:
+            self._pdf_to_images_queue.put({"type": "progress", "message": message})
+
+        try:
+            result = pdf_to_images_engine.render_pdf_to_images(
+                source_path, output_dir, page_indices,
+                image_format=image_format, dpi=dpi, jpeg_quality=jpeg_quality,
+                progress_callback=report,
+            )
+            self._pdf_to_images_queue.put({
+                "type": "done", "success": True, "result": result, "error": None,
+            })
+        except pdf_engine.PDFEngineError as exc:
+            self._pdf_to_images_queue.put({
+                "type": "done", "success": False, "result": None, "error": str(exc),
+            })
+        except Exception:
+            self._pdf_to_images_queue.put({
+                "type": "done", "success": False, "result": None,
+                "error": "An unexpected error occurred while converting the PDF.",
+            })
+
+    def _poll_pdf_to_images_queue(self) -> None:
+        try:
+            while True:
+                item = self._pdf_to_images_queue.get_nowait()
+                if item["type"] == "progress":
+                    self.pdf_to_images_status_var.set(f"Status: {item['message']}")
+                elif item["type"] == "done":
+                    self._apply_pdf_to_images_result(item)
+                    return
+        except queue.Empty:
+            pass
+        self.root.after(80, self._poll_pdf_to_images_queue)
+
+    def _apply_pdf_to_images_result(self, item: dict) -> None:
+        self._assert_main_thread()
+        self.pdf_to_images_progress_bar.stop()
+        self.pdf_to_images_progress_bar.configure(mode="determinate", value=0)
+
+        self.pdf_to_images_in_progress = False
+
+        if item["success"]:
+            result = item["result"]
+            count = result["total_images"]
+            self.pdf_to_images_status_var.set(
+                f"Status: Created {count} image{'s' if count != 1 else ''} "
+                f"in '{self.pdf_to_images_output_dir}'."
+            )
+            # A completed conversion has fully consumed its source,
+            # mirroring the "source consumed on success" convention
+            # established since Unlock PDF (Phase 19) -- clear it so
+            # the workspace returns to its non-file-selected initial
+            # state. The output folder and image settings are
+            # deliberately kept, so converting several PDFs in a row
+            # into the same folder with the same settings is one
+            # Select + one Convert each.
+            self.pdf_to_images_source = None
+            self._update_pdf_to_images_source_label()
+            self.pdf_to_images_selection_var.set("")
+        else:
+            self.pdf_to_images_status_var.set("Status: Convert to Images failed.")
+            messagebox.showerror(
+                title="Convert to Images Failed", message=item["error"],
+                parent=self.root,
+            )
+
+        self._update_button_states()
+        # See the matching comment in _apply_import_results() -- PDF ->
+        # Images shares the same app-wide busy lock, so its completion
+        # must restore every other tool's controls too.
+        self._update_split_controls_state()
+        self._update_remove_pages_controls_state()
+        self._update_extract_controls_state()
+        self._update_organize_controls_state()
+        self._update_rotate_controls_state()
+        self._update_protect_controls_state()
+        self._update_unlock_controls_state()
+        self._update_page_numbers_controls_state()
+        self._update_watermark_controls_state()
+        self._update_images_to_pdf_controls_state()
+        self._update_pdf_to_images_controls_state()
 
 
 def run() -> None:
