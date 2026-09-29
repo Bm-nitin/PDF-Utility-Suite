@@ -82,6 +82,7 @@ import protect_engine
 import remove_pages_engine
 import rotate_engine
 import split_engine
+import thumbnail_preview
 import tool_registry
 import unlock_engine
 import watermark_engine
@@ -571,6 +572,21 @@ class MainWindow:
         self._pdf_to_images_import_in_progress = False
         self._pdf_to_images_queue: "queue.Queue[dict]" = queue.Queue()
         self.pdf_to_images_in_progress = False
+        # Phase 24.1: tracks which page count the preview grid's items
+        # currently reflect, so _update_pdf_to_images_feedback() only
+        # rebuilds the grid's cards (destroy + recreate) when the
+        # source actually changes, not on every keystroke in the range
+        # entry -- a highlight-only update (set_selected_ids()) is all
+        # that's needed for that.
+        self._pdf_to_images_preview_page_count: Optional[int] = None
+
+        # Phase 24.1: one shared, bounded thumbnail cache reused by
+        # every tool's preview grid (Organize Pages, Images -> PDF,
+        # PDF -> Images) -- see thumbnail_preview.py's own docstring.
+        # One shared instance (rather than one per tool) is simplest and
+        # is still bounded regardless of how many tools contribute to
+        # it, per that module's own LRU eviction.
+        self._shared_thumbnail_cache = thumbnail_preview.ThumbnailCache()
 
         self._configure_window()
         self._configure_styles()
@@ -1641,6 +1657,32 @@ class MainWindow:
         body_row = tk.Frame(order_inner, bg=COLOR_CARD)
         body_row.pack(fill="both", expand=True)
 
+        # Phase 24.1: a visual thumbnail preview of the current order,
+        # supporting click-to-select and drag-and-drop reordering.
+        # organize_order_var (above) remains the single source of
+        # truth: a drag here only ever calls organize_order_var.set(),
+        # exactly the same as _organize_move_selected() already does
+        # for Move Up/Move Down (see _on_organize_grid_reordered()
+        # below) -- so this never becomes a second, competing model.
+        # The listbox below it is kept exactly as it was (Phase 16) for
+        # the existing Move Up/Move Down buttons and any existing
+        # tests/keyboard workflow; the two stay in sync (see
+        # _rebuild_organize_listbox()).
+        preview_frame = tk.Frame(order_inner, bg=COLOR_CARD)
+        preview_frame.pack(fill="x", pady=(0, 10))
+        tk.Label(
+            preview_frame, text="Drag pages to reorder:",
+            font=("Segoe UI", 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w")
+        self.organize_preview_grid = thumbnail_preview.PreviewGrid(
+            preview_frame, thumb_size=110, reorderable=True, multiselect=False,
+            on_reorder=self._on_organize_grid_reordered,
+            on_select=self._on_organize_grid_selected,
+            cache=self._shared_thumbnail_cache, bg=COLOR_CARD,
+        )
+        self.organize_preview_grid.pack(fill="x", pady=(4, 0))
+        self.organize_preview_grid.set_thumbnail_loader(self._organize_thumbnail_loader)
+
         listbox_frame = tk.Frame(body_row, bg=COLOR_CARD)
         listbox_frame.pack(side="left", fill="both", expand=True)
         tk.Label(
@@ -1783,6 +1825,7 @@ class MainWindow:
 
         self.organize_order_listbox.delete(0, tk.END)
         if not order:
+            self.organize_preview_grid.set_items([])
             return
         for position, page_index in enumerate(order, start=1):
             self.organize_order_listbox.insert(
@@ -1791,8 +1834,76 @@ class MainWindow:
         if selected_index is not None and selected_index < len(order):
             self.organize_order_listbox.selection_set(selected_index)
 
+        # Phase 24.1: the preview grid mirrors the exact same order,
+        # using the (0-based) page index itself as the stable item id
+        # -- unambiguous since a reorder is always a permutation (every
+        # page appears exactly once; see organize_engine.py's own
+        # docstring), so no two cards ever share an id.
+        self.organize_preview_grid.set_items([
+            thumbnail_preview.PreviewItem(
+                item_id=page_index, label=f"Page {page_index + 1}",
+                thumb_key=page_index,
+            )
+            for page_index in order
+        ])
+        if selected_index is not None and selected_index < len(order):
+            self.organize_preview_grid.select(order[selected_index], notify=False)
+
+    def _organize_thumbnail_loader(self, item: "thumbnail_preview.PreviewItem") -> bytes:
+        """Runs on PreviewGrid's own background thread -- must not
+        touch any tkinter widget. self.organize_source.path is only
+        ever read here, never written to (thumbnail_preview.py's own
+        render function opens it read-only).
+        """
+        source = self.organize_source
+        if source is None:
+            raise ValueError("no source selected")
+        size = self.organize_preview_grid.thumb_size
+        cache_key = ("organize", str(source.path), source.size, item.thumb_key, size)
+        cached = self._shared_thumbnail_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        data = thumbnail_preview.render_pdf_page_thumbnail(
+            source.path, item.thumb_key, size,
+        )
+        self._shared_thumbnail_cache.put(cache_key, data)
+        return data
+
+    def _on_organize_grid_reordered(self, new_order_ids: List[int]) -> None:
+        """`new_order_ids` is the full list of (0-based) page indices in
+        their new, dragged order -- exactly what organize_order_var
+        needs, 1-based and comma-joined. Setting it fires
+        _on_organize_order_changed() -> _update_organize_feedback(),
+        which re-parses this exact text and rebuilds both the listbox
+        and this same preview grid from it -- the text entry remains
+        the single source of truth even for a drag-driven change,
+        exactly like Move Up/Move Down already ensure for themselves.
+        """
+        if self._any_operation_in_progress():
+            return
+        self.organize_order_var.set(",".join(str(i + 1) for i in new_order_ids))
+
+    def _on_organize_grid_selected(self, page_index: int) -> None:
+        """Keeps the existing listbox selection (and therefore Move Up/
+        Move Down's own state) in sync with a click in the preview grid
+        -- selection must work from either surface without the two ever
+        disagreeing.
+        """
+        order = self._organize_current_order
+        if order is None or page_index not in order:
+            return
+        position = order.index(page_index)
+        self.organize_order_listbox.selection_clear(0, tk.END)
+        self.organize_order_listbox.selection_set(position)
+        self.organize_order_listbox.see(position)
+        self._update_organize_move_buttons_state()
+
     def _on_organize_listbox_select(self, _event=None) -> None:
         self._update_organize_move_buttons_state()
+        selection = self.organize_order_listbox.curselection()
+        order = self._organize_current_order
+        if selection and order is not None and selection[0] < len(order):
+            self.organize_preview_grid.select(order[selection[0]], notify=False)
 
     def _update_organize_move_buttons_state(self) -> None:
         """Move Up/Move Down are only meaningful when the order is
@@ -1875,6 +1986,13 @@ class MainWindow:
         self.organize_clear_btn.configure(state="normal")
         self.organize_order_entry.configure(state="normal")
         self.organize_order_listbox.configure(state="normal")
+        # Phase 24.1: every completion path (this tool's own, or any
+        # other tool's -- see the "shares the same app-wide busy lock"
+        # comments throughout this file) calls this method, so this is
+        # the one place that reliably re-enables dragging once nothing
+        # is running anymore, matching organize_order_entry/_listbox
+        # just above.
+        self.organize_preview_grid.reorderable = True
         self._update_organize_feedback()
 
     def _update_organize_source_label(self) -> None:
@@ -3487,6 +3605,40 @@ class MainWindow:
         )
         self.images_to_pdf_count_label.pack(side="left", padx=(16, 0))
 
+        # Phase 24.1: a visual thumbnail preview of the current image
+        # order, supporting click-to-select and drag-and-drop
+        # reordering. self.images_to_pdf_files (below) remains the
+        # single source of truth: a drag here reorders that SAME list
+        # object in place (see _on_images_to_pdf_grid_reordered()), so
+        # "visual order == internal ImageFile order == generated PDF
+        # order" always holds without a second, competing model. The
+        # ordered list further below (with its own per-row Move Up/
+        # Move Down/Remove buttons, from Phase 22) is kept exactly as
+        # it was; both stay in sync because _render_images_to_pdf_list()
+        # rebuilds them together.
+        preview_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        preview_card.pack(fill="x", pady=(0, 16))
+        preview_inner = tk.Frame(preview_card, bg=COLOR_CARD)
+        preview_inner.pack(fill="x", padx=18, pady=14)
+        tk.Label(
+            preview_inner, text="Drag thumbnails to reorder:",
+            font=("Segoe UI", 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w")
+        self.images_to_pdf_preview_grid = thumbnail_preview.PreviewGrid(
+            preview_inner, thumb_size=110, reorderable=True, multiselect=False,
+            on_reorder=self._on_images_to_pdf_grid_reordered,
+            on_select=self._on_images_to_pdf_grid_selected,
+            on_delete=self._on_images_to_pdf_grid_delete_requested,
+            cache=self._shared_thumbnail_cache, bg=COLOR_CARD,
+        )
+        self.images_to_pdf_preview_grid.pack(fill="x", pady=(4, 0))
+        self.images_to_pdf_preview_grid.set_thumbnail_loader(
+            self._images_to_pdf_thumbnail_loader
+        )
+
         # Ordered list
         list_card = tk.Frame(
             outer, bg=COLOR_CARD,
@@ -3695,6 +3847,9 @@ class MainWindow:
         self.images_to_pdf_margin_entry.configure(state="normal")
         for radio in self.images_to_pdf_page_size_radios.values():
             radio.configure(state="normal")
+        # Phase 24.1: see the matching comment in
+        # _update_organize_controls_state().
+        self.images_to_pdf_preview_grid.reorderable = True
         self._render_images_to_pdf_list()
         self._update_images_to_pdf_feedback()
 
@@ -3705,6 +3860,19 @@ class MainWindow:
     def _render_images_to_pdf_list(self) -> None:
         for child in self.images_to_pdf_list_container.winfo_children():
             child.destroy()
+
+        # Phase 24.1: the preview grid uses each ImageFile object's own
+        # identity (id()) as its stable item id -- the same "identity,
+        # not value equality" convention _find_image_index() already
+        # established, and the reason a duplicate-path selection (two
+        # separate ImageFile instances for the same file) still shows
+        # as two distinguishable thumbnails here.
+        self.images_to_pdf_preview_grid.set_items([
+            thumbnail_preview.PreviewItem(
+                item_id=id(image_file), label=image_file.name, thumb_key=image_file,
+            )
+            for image_file in self.images_to_pdf_files
+        ])
 
         if not self.images_to_pdf_files:
             tk.Label(
@@ -3717,6 +3885,49 @@ class MainWindow:
 
         for index, image_file in enumerate(self.images_to_pdf_files, start=1):
             self._build_image_row(self.images_to_pdf_list_container, index, image_file)
+
+    def _images_to_pdf_thumbnail_loader(self, item: "thumbnail_preview.PreviewItem") -> bytes:
+        """Runs on PreviewGrid's own background thread -- must not touch
+        any tkinter widget. Only ever reads `image_file.path`.
+        """
+        image_file: models.ImageFile = item.thumb_key
+        size = self.images_to_pdf_preview_grid.thumb_size
+        cache_key = ("images_to_pdf", str(image_file.path), image_file.size, size)
+        cached = self._shared_thumbnail_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        data = thumbnail_preview.render_image_file_thumbnail(image_file.path, size)
+        self._shared_thumbnail_cache.put(cache_key, data)
+        return data
+
+    def _on_images_to_pdf_grid_reordered(self, new_id_order: List[int]) -> None:
+        """`new_id_order` is the full list of id(image_file) values in
+        their new, dragged order. self.images_to_pdf_files is
+        reordered in place to match -- the SAME list object every other
+        piece of this tool's state already refers to -- and then
+        _render_images_to_pdf_list() is called to keep the ordered-list
+        view (and, redundantly but harmlessly, this same grid -- a fast
+        cache hit) in sync, exactly mirroring what _on_move_image_up()/
+        _on_move_image_down() already do for their own reordering.
+        """
+        if self._any_operation_in_progress():
+            return
+        by_id = {id(f): f for f in self.images_to_pdf_files}
+        try:
+            self.images_to_pdf_files[:] = [by_id[i] for i in new_id_order]
+        except KeyError:
+            return  # a stale callback racing a concurrent list change
+        self._render_images_to_pdf_list()
+        self.images_to_pdf_status_var.set("Status: Reordered images.")
+
+    def _on_images_to_pdf_grid_selected(self, item_id: int) -> None:
+        pass  # visual selection only; no other UI state currently depends on it
+
+    def _on_images_to_pdf_grid_delete_requested(self, item_id: int) -> None:
+        for image_file in self.images_to_pdf_files:
+            if id(image_file) == item_id:
+                self._on_remove_image(image_file)
+                return
 
     def _build_image_row(
         self, parent: tk.Widget, index: int, image_file: models.ImageFile,
@@ -3950,6 +4161,39 @@ class MainWindow:
             font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
         ).pack(anchor="w", pady=(6, 0))
 
+        # Phase 24.1: a read-only-ordered page preview for visual
+        # confirmation of the current selection -- NOT reorderable
+        # (PDF -> Images has no reordering concept: it renders pages in
+        # the order resolve_pages_to_render() already establishes, per
+        # that function's own documented semantics, which this preview
+        # must not silently change). Clicking a thumbnail toggles that
+        # page in/out of the SAME pdf_to_images_selection_var range text
+        # that already drives everything else (validation, the actual
+        # render call) -- the range text remains authoritative; the grid
+        # only ever mirrors it (via set_selected_ids()) or edits it (via
+        # a click), never maintains a separate selection of its own. See
+        # _on_pdf_to_images_thumbnail_clicked().
+        preview_card = tk.Frame(
+            outer, bg=COLOR_CARD,
+            highlightbackground=COLOR_BORDER, highlightthickness=1,
+        )
+        preview_card.pack(fill="x", pady=(0, 16))
+        preview_inner = tk.Frame(preview_card, bg=COLOR_CARD)
+        preview_inner.pack(fill="x", padx=18, pady=14)
+        tk.Label(
+            preview_inner, text="Click a page to include/exclude it:",
+            font=("Segoe UI", 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+        ).pack(anchor="w")
+        self.pdf_to_images_preview_grid = thumbnail_preview.PreviewGrid(
+            preview_inner, thumb_size=100, reorderable=False, multiselect=True,
+            on_select=self._on_pdf_to_images_thumbnail_clicked,
+            cache=self._shared_thumbnail_cache, bg=COLOR_CARD,
+        )
+        self.pdf_to_images_preview_grid.pack(fill="x", pady=(4, 0))
+        self.pdf_to_images_preview_grid.set_thumbnail_loader(
+            self._pdf_to_images_thumbnail_loader
+        )
+
         # Format / DPI / quality card
         format_inner = make_card()
         tk.Label(
@@ -4093,6 +4337,115 @@ class MainWindow:
         )
         self._update_pdf_to_images_feedback()
 
+    def _sync_pdf_to_images_preview_items(self, page_count: int) -> None:
+        """Rebuilds the preview grid's cards only when the page count
+        it currently reflects has actually changed (a new/different
+        source PDF) -- see _pdf_to_images_preview_page_count's own
+        comment for why this check exists.
+        """
+        if self._pdf_to_images_preview_page_count == page_count:
+            return
+        self._pdf_to_images_preview_page_count = page_count
+        self.pdf_to_images_preview_grid.set_items([
+            thumbnail_preview.PreviewItem(
+                item_id=page_index, label=f"Page {page_index + 1}",
+                thumb_key=page_index,
+            )
+            for page_index in range(page_count)
+        ])
+
+    def _pdf_to_images_thumbnail_loader(self, item: "thumbnail_preview.PreviewItem") -> bytes:
+        """Runs on PreviewGrid's own background thread -- must not
+        touch any tkinter widget. Only ever reads self.pdf_to_images_
+        source.path.
+        """
+        source = self.pdf_to_images_source
+        if source is None:
+            raise ValueError("no source selected")
+        size = self.pdf_to_images_preview_grid.thumb_size
+        cache_key = ("pdf_to_images", str(source.path), source.size, item.thumb_key, size)
+        cached = self._shared_thumbnail_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        data = thumbnail_preview.render_pdf_page_thumbnail(
+            source.path, item.thumb_key, size,
+        )
+        self._shared_thumbnail_cache.put(cache_key, data)
+        return data
+
+    @staticmethod
+    def _format_page_sequence(indices: List[int]) -> str:
+        """Formats 0-based page indices as the existing 1-based range
+        syntax, PRESERVING the given order and any duplicates exactly
+        (per resolve_pages_to_render()'s own documented typed-order
+        semantics). Only runs of 3+ strictly ascending consecutive pages
+        are compressed to "a-b"; everything else is listed page by page,
+        so this never reorders or deduplicates what the person typed.
+        """
+        parts: List[str] = []
+        i = 0
+        while i < len(indices):
+            j = i
+            while j + 1 < len(indices) and indices[j + 1] == indices[j] + 1:
+                j += 1
+            if j - i + 1 >= 3:
+                parts.append(f"{indices[i] + 1}-{indices[j] + 1}")
+            else:
+                parts.extend(str(n + 1) for n in indices[i:j + 1])
+            i = j + 1
+        return ",".join(parts)
+
+    def _on_pdf_to_images_thumbnail_clicked(self, page_index: int) -> None:
+        """Toggles `page_index` in/out of the page-range text that
+        remains authoritative for this tool -- see this workspace's own
+        preview-card comment for why the grid never maintains a second,
+        competing selection.
+
+        Preserves the established selection semantics rather than
+        inventing new ones: the current text is parsed with the SAME
+        resolve_pages_to_render(), keeping the person's typed order and
+        duplicates (that order IS the render order); toggling a page ON
+        appends it at the end, toggling it OFF removes every occurrence.
+        Clicking while in "All pages" mode starts a new "Selected pages"
+        selection containing just that page, rather than silently doing
+        nothing.
+
+        The grid has already marked the card selected by the time this
+        callback runs, so every path -- including the early returns --
+        finishes by re-deriving the highlight from the authoritative
+        text (via _update_pdf_to_images_feedback()) so the two can never
+        disagree.
+        """
+        source = self.pdf_to_images_source
+        if self._any_operation_in_progress() or source is None:
+            self._update_pdf_to_images_feedback()
+            return
+        page_count = source.page_count or 0
+
+        if self.pdf_to_images_all_pages_var.get():
+            self.pdf_to_images_all_pages_var.set(False)
+            self._update_pdf_to_images_mode_controls()
+            self.pdf_to_images_selection_var.set(str(page_index + 1))
+            self._update_pdf_to_images_feedback()
+            return
+
+        text = self.pdf_to_images_selection_var.get()
+        try:
+            current = (
+                pdf_to_images_engine.resolve_pages_to_render(text, page_count)
+                if text.strip() else []
+            )
+        except split_engine.PageRangeError:
+            current = []
+
+        if page_index in current:
+            current = [i for i in current if i != page_index]
+        else:
+            current = current + [page_index]
+
+        self.pdf_to_images_selection_var.set(self._format_page_sequence(current))
+        self._update_pdf_to_images_feedback()
+
     def _update_pdf_to_images_feedback(self) -> None:
         """The single place that keeps the pages/options summary, the
         validation error message, and the CONVERT TO IMAGES button's
@@ -4104,17 +4457,23 @@ class MainWindow:
         self.pdf_to_images_error_var.set("")
 
         if self.pdf_to_images_source is None:
+            if self._pdf_to_images_preview_page_count is not None:
+                self.pdf_to_images_preview_grid.set_items([])
+                self._pdf_to_images_preview_page_count = None
             self.pdf_to_images_feedback_var.set("Select a PDF file first.")
             self.pdf_to_images_button.configure(state="disabled")
             return
 
         page_count = self.pdf_to_images_source.page_count or 0
+        self._sync_pdf_to_images_preview_items(page_count)
 
         if self.pdf_to_images_all_pages_var.get():
             pages_summary = f"Pages: All ({page_count})"
+            self.pdf_to_images_preview_grid.set_selected_ids(range(page_count))
         else:
             text = self.pdf_to_images_selection_var.get()
             if not text.strip():
+                self.pdf_to_images_preview_grid.set_selected_ids(())
                 self.pdf_to_images_feedback_var.set("Enter pages to convert.")
                 self.pdf_to_images_button.configure(state="disabled")
                 return
@@ -4123,11 +4482,13 @@ class MainWindow:
                     text, page_count,
                 )
             except split_engine.PageRangeError as exc:
+                self.pdf_to_images_preview_grid.set_selected_ids(())
                 self.pdf_to_images_error_var.set(str(exc))
                 self.pdf_to_images_feedback_var.set(f"Pages: {text.strip()}")
                 self.pdf_to_images_button.configure(state="disabled")
                 return
             pages_summary = f"Pages: {text.strip()} ({len(indices)} image(s))"
+            self.pdf_to_images_preview_grid.set_selected_ids(indices)
 
         try:
             image_format = pdf_to_images_engine.validate_format(
@@ -4978,6 +5339,9 @@ class MainWindow:
         self.organize_order_entry.configure(state=state)
         self.organize_move_up_btn.configure(state="disabled")
         self.organize_move_down_btn.configure(state="disabled")
+        # Phase 24.1: dragging must not be able to start a reorder while
+        # any operation (including Organize Pages' own) is running.
+        self.organize_preview_grid.reorderable = enabled
 
         # Phase 17: Rotate Pages' own controls follow the same busy
         # flag too, for the same reason every other tool's do.
@@ -5060,6 +5424,9 @@ class MainWindow:
         self.images_to_pdf_margin_entry.configure(state=state)
         for radio in self.images_to_pdf_page_size_radios.values():
             radio.configure(state=state)
+        # Phase 24.1: dragging must not be able to start a reorder while
+        # any operation is running.
+        self.images_to_pdf_preview_grid.reorderable = enabled
 
         # Phase 23: PDF -> Images' own controls follow the same busy
         # flag too, for the same reason every other tool's do. The
