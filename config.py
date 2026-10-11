@@ -13,7 +13,7 @@ from pathlib import Path
 # Application identity
 # ---------------------------------------------------------------------------
 
-APP_NAME = "PDF Utilities Application"
+APP_NAME = "PDF Merger & Compressor"
 APP_VERSION = "1.0.0"
 
 # ---------------------------------------------------------------------------
@@ -50,6 +50,20 @@ LOGO_PATH = ASSETS_DIR / "logo.png"
 
 COMPRESSION_LEVELS = ("low", "recommended", "maximum")
 
+# NOTE: "image_recompress"/"image_quality" below describe the INTENDED
+# behavior of "recommended" and "maximum" -- lossy recompression of
+# embedded raster images. A confirmed image-corruption bug (see
+# pdf_engine.py's LOSSY_IMAGE_RECOMPRESSION_ENABLED and
+# _recompress_images() docstrings) means that code path is currently
+# disabled for every preset at the pdf_engine.py level, regardless of
+# these values, so none of the three presets below actually changes
+# image quality right now -- all three perform structural/lossless
+# optimization only (the "garbage"/"deflate"/"clean" settings), differing
+# only in how aggressive that structural cleanup is. The "description"
+# strings reflect that current, temporary reality rather than the
+# target behavior, so the UI never claims a lossy effect that isn't
+# happening; update them back once LOSSY_IMAGE_RECOMPRESSION_ENABLED is
+# safely re-enabled.
 COMPRESSION_PRESETS = {
     "low": {
         "label": "Low",
@@ -64,7 +78,10 @@ COMPRESSION_PRESETS = {
     },
     "recommended": {
         "label": "Recommended",
-        "description": "Balanced size reduction with negligible visual impact.",
+        "description": (
+            "Balanced structural cleanup. Image quality is currently "
+            "left untouched."
+        ),
         "garbage": 3,
         "deflate": True,
         "deflate_images": True,
@@ -75,7 +92,10 @@ COMPRESSION_PRESETS = {
     },
     "maximum": {
         "label": "Maximum Compression",
-        "description": "Smallest possible file. May reduce image quality.",
+        "description": (
+            "Most aggressive structural cleanup. Image quality is "
+            "currently left untouched."
+        ),
         "garbage": 4,
         "deflate": True,
         "deflate_images": True,

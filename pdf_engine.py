@@ -261,6 +261,48 @@ def merge_pdfs(
 # Compression
 # ---------------------------------------------------------------------------
 
+#: SAFETY SWITCH -- read this before touching _recompress_images().
+#:
+#: _recompress_images() has a confirmed image-corruption bug: it
+#: re-encodes an embedded image's pixel data to JPEG via
+#: Pixmap.tobytes("jpeg", ...) and writes those bytes in place with
+#: doc.update_stream(xref, jpeg_bytes). update_stream() replaces ONLY the
+#: raw stream bytes of that xref -- it does not touch any of the image
+#: XObject's own dictionary entries (/Filter, /ColorSpace,
+#: /BitsPerComponent, /DecodeParms, /SMask, ...), which still describe
+#: the ORIGINAL encoding (commonly /FlateDecode, straight from
+#: insert_image()/a scanner/an original JPEG re-saved as PNG). After the
+#: call, the xref's stream bytes are JPEG (/DCTDecode) while its
+#: dictionary still claims the old filter, a colorspace that may no
+#: longer match (CMYK/other non-RGB images are forcibly converted to RGB
+#: before re-encoding, but /ColorSpace is never updated to match), and
+#: potentially a now-orphaned /SMask. Every PDF reader -- including
+#: PyMuPDF's own renderer -- decodes the stream using the (now wrong)
+#: /Filter, producing garbage pixel data; this was reproduced directly
+#: and confirmed to render as solid black for a simple embedded RGB PNG.
+#: Simply patching the stream bytes can never be correct in general:
+#: Width/Height/ColorSpace/BitsPerComponent/SMask all need to be kept in
+#: sync with whatever the new stream actually contains, and PyMuPDF has
+#: no single call that does this safely for every colorspace/mask
+#: combination.
+#:
+#: Until a safe replacement is implemented and proven (by tests covering
+#: at minimum: embedded JPEG, PNG, transparent/soft-masked, grayscale,
+#: and CMYK images, verified by re-rendering and comparing pixels -- not
+#: just "the file re-opens"), this stays False and _recompress_images()
+#: is never called, for ANY preset. "low" was already unaffected (its
+#: own "image_recompress" preset value is already False); "recommended"
+#: and "maximum" now also skip image recompression and perform
+#: structural optimization only (garbage collection, stream deflation,
+#: cleanup -- all lossless) until this is flipped back on. The
+#: "image_recompress"/"image_quality" values in
+#: config.COMPRESSION_PRESETS are left as-is (they describe the
+#: intended behavior once this is safe again); this single switch is
+#: what actually controls whether that code path can run, so re-enabling
+#: it later never requires touching the preset table.
+LOSSY_IMAGE_RECOMPRESSION_ENABLED = False
+
+
 def compress_pdf(
     input_path: Path,
     output_path: Path,
@@ -271,10 +313,16 @@ def compress_pdf(
     Strategy:
       1. Always apply PyMuPDF's structural optimization on save
          (garbage collection, stream deflation, cleanup) -- this is safe
-         and lossless.
-      2. For 'recommended' and 'maximum', additionally recompress embedded
-         raster images to a target JPEG quality, which is lossy but is
-         the main lever for image-heavy PDFs.
+         and lossless, for every preset including 'recommended' and
+         'maximum'.
+      2. Lossy image recompression (re-encoding embedded raster images
+         at a lower JPEG quality) is current temporarily DISABLED for
+         every preset -- see LOSSY_IMAGE_RECOMPRESSION_ENABLED's own
+         docstring just above for the confirmed corruption bug behind
+         this. 'recommended' and 'maximum' currently perform the same
+         structural-only optimization 'low' does, just with more
+         aggressive garbage-collection/deflate settings; none of the
+         three presets changes image quality right now.
 
     If the resulting file is NOT smaller than the input, the original
     (structurally-optimized) result is still returned -- callers should
@@ -307,7 +355,7 @@ def compress_pdf(
         ) from exc
 
     try:
-        if preset["image_recompress"]:
+        if preset["image_recompress"] and LOSSY_IMAGE_RECOMPRESSION_ENABLED:
             _recompress_images(doc, preset["image_quality"])
 
         _atomic_save_pdf(
@@ -335,6 +383,18 @@ def _recompress_images(doc: "pymupdf.Document", quality: int) -> None:
     """Re-encode embedded raster images at a lower JPEG quality, in place,
     within an already-open document (before save()). Skips images that
     fail to process individually rather than aborting the whole document.
+
+    CURRENTLY UNREACHABLE / UNSAFE -- see LOSSY_IMAGE_RECOMPRESSION_ENABLED
+    above compress_pdf() for the confirmed image-corruption bug in this
+    function (doc.update_stream() does not update the image XObject's
+    /Filter/colorspace/mask dictionary entries to match the newly-written
+    JPEG bytes, so readers decode the stream incorrectly). This function
+    is left in place, unmodified, as the starting point for a real fix;
+    it is simply never called while the switch above is False. Do not
+    call this function directly, and do not flip the switch back on
+    without first fixing this function and adding passing regression
+    tests that render and compare pixels for JPEG, PNG,
+    transparent/soft-masked, grayscale, and CMYK source images.
     """
     for page_index in range(doc.page_count):
         page = doc[page_index]
