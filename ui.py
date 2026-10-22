@@ -68,6 +68,7 @@ from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
 import tkinter as tk
+import webbrowser
 from tkinter import colorchooser, messagebox, ttk
 
 import extract_engine
@@ -87,6 +88,7 @@ import tool_registry
 import unlock_engine
 import watermark_engine
 from config import APP_NAME, APP_VERSION
+import update_checker
 
 # ---------------------------------------------------------------------------
 # Color palette -- clean modern light theme
@@ -590,7 +592,79 @@ class MainWindow:
 
         self._configure_window()
         self._configure_styles()
+        self._build_help_menu()
         self._build_layout()
+
+    # ------------------------------------------------------------------
+    # Window / style setup
+    # ------------------------------------------------------------------
+   
+    # ------------------------------------------------------------------
+    # Help menu and update checker
+    # ------------------------------------------------------------------
+
+    def _build_help_menu(self) -> None:
+        """Add application help and update-check actions."""
+        menubar = tk.Menu(self.root)
+        help_menu = tk.Menu(menubar, tearoff=False)
+
+        help_menu.add_command(
+            label="Check for Updates",
+            command=self._on_check_for_updates,
+        )
+        help_menu.add_separator()
+        help_menu.add_command(
+            label=f"About {APP_NAME}",
+            command=lambda: messagebox.showinfo(
+                "About",
+                f"{APP_NAME}\nVersion {APP_VERSION}",
+                parent=self.root,
+            ),
+        )
+
+        menubar.add_cascade(label="Help", menu=help_menu)
+        self.root.configure(menu=menubar)
+
+    def _on_check_for_updates(self) -> None:
+        """Check GitHub for a newer published release."""
+        try:
+            result = update_checker.check_for_update()
+        except update_checker.UpdateCheckError as exc:
+            messagebox.showwarning(
+                "Update Check",
+                str(exc),
+                parent=self.root,
+            )
+            return
+
+        if not result["update_available"]:
+            messagebox.showinfo(
+                "No Updates Available",
+                f"You are using the latest version ({APP_VERSION}).",
+                parent=self.root,
+            )
+            return
+
+        version = result["version"]
+        release_url = result["release_url"]
+
+        open_release = messagebox.askyesno(
+            "Update Available",
+            f"Version {version} is available.\n\n"
+            "Open the official release page in your browser?",
+            parent=self.root,
+        )
+
+        if open_release:
+            try:
+                webbrowser.open(release_url)
+            except Exception as exc:
+                messagebox.showerror(
+                    "Could Not Open Browser",
+                    f"Open this release page manually:\n"
+                    f"{release_url}\n\n{exc}",
+                    parent=self.root,
+                )
 
     # ------------------------------------------------------------------
     # Window / style setup
@@ -598,15 +672,16 @@ class MainWindow:
 
     def _configure_window(self) -> None:
         self.root.title(APP_NAME)
-        # Phase 12: widened to fit the new tool navigation sidebar. The
-        # Merge & Compress workspace itself keeps its original size and
-        # layout -- only the window grew to make room alongside it.
+        # Phase 12: widened to fit the new tool navigation sidebar.
+        # The Merge & Compress workspace keeps its original layout.
         self.root.geometry("960x820")
         self.root.minsize(860, 800)
         self.root.configure(bg=COLOR_BG)
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
+        # Keep the existing style configuration below this point.
+
         # 'clam' is the most style-able built-in ttk theme and looks
         # consistent across Windows versions.
         style.theme_use("clam")
