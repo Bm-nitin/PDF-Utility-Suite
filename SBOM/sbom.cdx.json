@@ -1,0 +1,405 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:a24b5d35-83ab-4605-a3a1-2c21fdcdb40e",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-23T04:20:27Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "cyclonedx-py",
+          "version": "7.1.0",
+          "description": "Used to parse requirements.txt and generate the base component list/PURLs for this SBOM. Run: cyclonedx-py requirements requirements.txt --of JSON -o base.json -v (see REPORT.md 'Reproducible generation commands'). The tool itself reported, for every one of the three direct dependencies: \"component has no pinned version\" -- independent, tool-level confirmation that this project's manifest declares no exact/locked versions."
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "app-pdf-merger-compressor",
+      "name": "PDF Merger & Compressor",
+      "version": "1.0.0",
+      "description": "Local-first desktop PDF toolkit (Tkinter GUI) for merge, compress, split, page editing, watermarking, page numbering, image<->PDF conversion, password protection/removal, and related PDF operations.",
+      "licenses": [
+        {
+          "license": {
+            "name": "UNDECLARED -- README.md states: \"License: Pending. No open-source license has been selected yet.\" (verified, README.md lines ~11 and ~326-330). No LICENSE file is present in the project."
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:nameDiscrepancy",
+          "value": "Three different project names were found in the source: the archive/folder is 'PDF-Merger-Compressor'; config.py's APP_NAME constant is 'PDF Merger & Compressor' (used here as the component name); README.md's title and its Project Structure diagram both say 'PDF Utility Suite' / 'PDF-Utility-Suite/'. Not resolved by this SBOM -- reported as a finding, not guessed at."
+        },
+        {
+          "name": "sbom:versionSource",
+          "value": "config.py: APP_VERSION = \"1.0.0\" (verified by direct source inspection). No git tags, CHANGELOG, or release metadata were present to corroborate this against a release history."
+        }
+      ]
+    }
+  },
+  "components": [
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/pymupdf",
+      "name": "PyMuPDF",
+      "purl": "pkg:pypi/pymupdf",
+      "scope": "required",
+      "description": "PDF/XPS/document rendering, editing and encryption library. Imported as `import pymupdf` throughout the application (pdf_engine.py and every *_engine.py module) -- verified by source grep; this is the application's single most heavily used third-party dependency.",
+      "licenses": [
+        {
+          "license": {
+            "name": "Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:declaredConstraint",
+          "value": ">=1.24.0"
+        },
+        {
+          "name": "sbom:manifestLine",
+          "value": "requirements.txt: \"PyMuPDF>=1.24.0\" (verbatim)"
+        },
+        {
+          "name": "sbom:resolvedVersion",
+          "value": "UNKNOWN -- no lockfile is present (see REPORT.md); the exact version actually installed in any given environment depends entirely on what PyPI resolves for \">=1.24.0\" at install time, which changes as new releases ship. No `version` field is set on this component for that reason, per CycloneDX/PEP 440 guidance for an unpinned requirement."
+        },
+        {
+          "name": "sbom:licenseEvidenceSource",
+          "value": "Directly observed via `pip show pymupdf` / dist-info METADATA for pymupdf==1.28.2 (a version satisfying the project's own >=1.24.0 constraint), installed in the analysis sandbox on 2026-10-23 -- NOT installed from this project's own (nonexistent) lockfile/environment. PyMuPDF's open-source distribution channel has used this same AGPL-3.0-or-later / commercial dual-license model across its current 1.x release line; this was not individually re-verified for every version >=1.24.0."
+        },
+        {
+          "name": "sbom:licenseComplianceNote",
+          "value": "AGPL-3.0 is a strong-copyleft license with network-use provisions. PyMuPDF is imported directly into this application's own runtime (not an isolated build-time tool), so AGPL's terms are the primary license-compliance item to evaluate before any distribution of this application -- separate from the 'License: Pending' status of the application's own code."
+        },
+        {
+          "name": "sbom:bundledComponent",
+          "value": "PyMuPDF wheels statically bundle the MuPDF C library (Artifex Software). See component pkg:generic/mupdf below -- listed separately because it is the actual implementer of the cryptographic functionality described in the companion CBOM."
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://pypi.org/project/PyMuPDF/"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:generic/mupdf",
+      "name": "MuPDF",
+      "purl": "pkg:generic/mupdf",
+      "scope": "required",
+      "description": "C library implementing PDF parsing, rendering, and the PDF standard security handler (encryption/decryption). Statically bundled inside the PyMuPDF wheel; not a separately pip-installed package, so it has no PyPI PURL of its own and is not independently version-pinnable from this project's manifest.",
+      "licenses": [
+        {
+          "license": {
+            "name": "Dual Licensed - GNU AFFERO GPL 3.0 or Artifex Commercial License (same licensing program as PyMuPDF; MuPDF is Artifex Software's own underlying engine)"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:evidenceSource",
+          "value": "pymupdf.VersionFitz / pymupdf.mupdf_version, observed as \"1.28.2\" on the same representative pymupdf==1.28.2 install used for the license check above -- PyMuPDF versions its wheel release in lockstep with its bundled MuPDF version as of this release line, per direct inspection of that module's own version attributes. Not independently confirmed for other versions satisfying >=1.24.0."
+        },
+        {
+          "name": "sbom:cbomReference",
+          "value": "This is the component that actually performs the AES-256 PDF encryption described in cbom.cdx.json -- see that file's cryptographic-asset entries."
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://mupdf.com/"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/pillow",
+      "name": "Pillow",
+      "purl": "pkg:pypi/pillow",
+      "scope": "required",
+      "description": "Imaging library. Verified usage: images_to_pdf_engine.py (PIL.Image, PIL.ImageOps for EXIF-orientation handling) and thumbnail_preview.py (thumbnail generation for the image/page preview grid) -- confirmed by source grep (`from PIL import ...`). Not imported by pdf_engine.py or any PDF-encryption/decryption code path.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT-CMU"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:declaredConstraint",
+          "value": ">=10.0.0"
+        },
+        {
+          "name": "sbom:manifestLine",
+          "value": "requirements.txt: \"Pillow>=10.0.0\" (verbatim)"
+        },
+        {
+          "name": "sbom:resolvedVersion",
+          "value": "UNKNOWN -- no lockfile is present; see the same note on the PyMuPDF component above."
+        },
+        {
+          "name": "sbom:licenseEvidenceSource",
+          "value": "Directly observed via dist-info METADATA (`License-Expression: MIT-CMU`) for pillow==12.1.1, installed in the analysis sandbox on 2026-10-23 -- not from this project's own (nonexistent) lockfile/environment."
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://pypi.org/project/pillow/"
+        }
+      ]
+    },
+    {
+      "type": "application",
+      "bom-ref": "pkg:pypi/pyinstaller",
+      "name": "pyinstaller",
+      "purl": "pkg:pypi/pyinstaller",
+      "scope": "excluded",
+      "description": "Build-time only: bundles the application and its dependencies into a Windows executable (see PDF-Merger-Compressor.spec and build.bat, both verified present in the project). Not imported by any application source file and not present in the shipped application's own runtime import graph -- confirmed by source grep (no `import pyinstaller`/`import PyInstaller` anywhere outside the build tooling).",
+      "licenses": [
+        {
+          "license": {
+            "name": "GPLv2-or-later with a special exception which allows using PyInstaller to build and distribute non-free programs (including commercial ones)"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:declaredConstraint",
+          "value": ">=6.0.0"
+        },
+        {
+          "name": "sbom:manifestLine",
+          "value": "requirements.txt: \"pyinstaller>=6.0.0\" (verbatim)"
+        },
+        {
+          "name": "sbom:resolvedVersion",
+          "value": "UNKNOWN -- no lockfile is present; see the same note on the PyMuPDF component above."
+        },
+        {
+          "name": "sbom:licenseEvidenceSource",
+          "value": "Directly observed via `pip show pyinstaller` for pyinstaller==6.22.3, installed in the analysis sandbox on 2026-10-23."
+        },
+        {
+          "name": "sbom:licenseComplianceNote",
+          "value": "PyInstaller's GPLv2+exception is explicitly written to NOT impose copyleft on the application it packages -- this is a materially different compliance situation from PyMuPDF's AGPL above (which IS imported into, and runs as part of, the shipped application)."
+        },
+        {
+          "name": "sbom:codeSigning",
+          "value": "PDF-Merger-Compressor.spec sets codesign_identity=None -- verified by direct inspection. The build produces an UNSIGNED Windows executable; no code-signing certificate or process is configured anywhere in this project."
+        }
+      ],
+      "externalReferences": [
+        {
+          "type": "distribution",
+          "url": "https://pypi.org/project/pyinstaller/"
+        },
+        {
+          "type": "build-system",
+          "url": "file://PDF-Merger-Compressor.spec"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/altgraph",
+      "name": "altgraph",
+      "purl": "pkg:pypi/altgraph",
+      "scope": "excluded",
+      "description": "Transitive build-time dependency of pyinstaller. NOT declared anywhere in requirements.txt -- discovered only by resolving pyinstaller's own dependency metadata in the analysis sandbox, which is possible only because no lockfile captures this project's actual transitive dependency set.",
+      "version": "0.17.5",
+      "licenses": [],
+      "properties": [
+        {
+          "name": "sbom:evidenceSource",
+          "value": "pip show altgraph, in the analysis sandbox, as a dependency resolved for pyinstaller==6.22.3 on 2026-10-23. Version is the sandbox's resolved version, not a value from this project's own manifest (which does not mention this package at all)."
+        },
+        {
+          "name": "sbom:undeclaredTransitive",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/packaging",
+      "name": "packaging",
+      "purl": "pkg:pypi/packaging",
+      "scope": "excluded",
+      "description": "Transitive build-time dependency of pyinstaller. NOT declared anywhere in requirements.txt.",
+      "version": "26.0",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0 OR BSD-2-Clause (dual-licensed; not independently re-verified for this exact observed version)"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:evidenceSource",
+          "value": "pip show packaging, in the analysis sandbox, as a dependency resolved for pyinstaller==6.22.3 on 2026-10-23."
+        },
+        {
+          "name": "sbom:undeclaredTransitive",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/pyinstaller-hooks-contrib",
+      "name": "pyinstaller-hooks-contrib",
+      "purl": "pkg:pypi/pyinstaller-hooks-contrib",
+      "scope": "excluded",
+      "description": "Transitive build-time dependency of pyinstaller (community PyInstaller hooks, relevant because PDF-Merger-Compressor.spec relies on PyInstaller's hook mechanism via collect_all('pymupdf')). NOT declared anywhere in requirements.txt.",
+      "version": "2026.9",
+      "licenses": [
+        {
+          "license": {
+            "name": "Apache-2.0 OR GPL-2.0 (dual classifiers observed; not independently re-verified for this exact observed version)"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:evidenceSource",
+          "value": "pip show pyinstaller-hooks-contrib, in the analysis sandbox, as a dependency resolved for pyinstaller==6.22.3 on 2026-10-23."
+        },
+        {
+          "name": "sbom:undeclaredTransitive",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/setuptools",
+      "name": "setuptools",
+      "purl": "pkg:pypi/setuptools",
+      "scope": "excluded",
+      "description": "Transitive build-time dependency of pyinstaller. NOT declared anywhere in requirements.txt.",
+      "version": "68.1.2",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:evidenceSource",
+          "value": "pip show setuptools, in the analysis sandbox, as a dependency resolved for pyinstaller==6.22.3 on 2026-10-23."
+        },
+        {
+          "name": "sbom:undeclaredTransitive",
+          "value": "true"
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "pkg:pypi/pytest",
+      "name": "pytest",
+      "purl": "pkg:pypi/pytest",
+      "scope": "required",
+      "description": "Test framework. Imported by 36 files under tests/ (verified by `grep -rl '^import pytest'`), and the project's own README.md 'Technology Stack' table lists pytest as part of the stack -- but pytest does NOT appear in requirements.txt or any other dependency manifest. No version constraint is declared anywhere for this package.",
+      "licenses": [
+        {
+          "license": {
+            "id": "MIT"
+          }
+        }
+      ],
+      "properties": [
+        {
+          "name": "sbom:finding",
+          "value": "UNDECLARED DIRECT DEPENDENCY. The project cannot be tested in a fresh environment built strictly from requirements.txt. See REPORT.md."
+        },
+        {
+          "name": "sbom:resolvedVersion",
+          "value": "UNKNOWN -- not declared anywhere, so no constraint or version can be reported."
+        }
+      ]
+    },
+    {
+      "type": "platform",
+      "bom-ref": "component-cpython",
+      "name": "CPython",
+      "description": "Python interpreter. Required runtime platform for every component in this BOM; not a pip-installed package, so it is not (and cannot correctly be) declared in requirements.txt, and has no PyPI PURL.",
+      "properties": [
+        {
+          "name": "sbom:declaredConstraint",
+          "value": "README.md ('Installation'/'Technology Stack' sections): \"Python 3.10 or a compatible version\" -- stated as guidance in prose, not encoded in any machine-readable manifest (no pyproject.toml `requires-python`, no setup.cfg, no runtime version check found in source)."
+        },
+        {
+          "name": "sbom:resolvedVersion",
+          "value": "UNKNOWN -- not pinned anywhere in the project."
+        }
+      ]
+    },
+    {
+      "type": "library",
+      "bom-ref": "component-tcltk",
+      "name": "Tcl/Tk",
+      "description": "GUI toolkit required at runtime via Python's `tkinter` standard-library module (imported extensively by ui.py, file_manager.py's filedialog/colorchooser/messagebox submodules, and thumbnail_preview.py -- verified by source grep). tkinter is bundled with most CPython distributions but depends on an underlying Tcl/Tk installation being present/linked; it is not a pip package and has no entry in requirements.txt or a PURL. On some Linux distributions this requires a separate OS package (e.g. python3-tk) not installed by `pip install -r requirements.txt`.",
+      "properties": [
+        {
+          "name": "sbom:resolvedVersion",
+          "value": "UNKNOWN -- determined entirely by the host Python/OS distribution, not by this project."
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "app-pdf-merger-compressor",
+      "dependsOn": [
+        "pkg:pypi/pymupdf",
+        "pkg:pypi/pillow",
+        "component-cpython",
+        "component-tcltk"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/pymupdf",
+      "dependsOn": ["pkg:generic/mupdf"]
+    },
+    {
+      "ref": "pkg:pypi/pillow",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:generic/mupdf",
+      "dependsOn": []
+    },
+    {
+      "ref": "pkg:pypi/pyinstaller",
+      "dependsOn": [
+        "pkg:pypi/altgraph",
+        "pkg:pypi/packaging",
+        "pkg:pypi/pyinstaller-hooks-contrib",
+        "pkg:pypi/setuptools"
+      ]
+    },
+    {
+      "ref": "pkg:pypi/pytest",
+      "dependsOn": []
+    },
+    {
+      "ref": "component-cpython",
+      "dependsOn": ["component-tcltk"]
+    }
+  ]
+}

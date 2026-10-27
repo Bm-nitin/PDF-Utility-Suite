@@ -1,0 +1,162 @@
+{
+  "$schema": "http://cyclonedx.org/schema/bom-1.6.schema.json",
+  "bomFormat": "CycloneDX",
+  "specVersion": "1.6",
+  "serialNumber": "urn:uuid:c3899f63-3a45-4ae8-9828-c1c2003d87fd",
+  "version": 1,
+  "metadata": {
+    "timestamp": "2026-10-23T04:20:27Z",
+    "tools": {
+      "components": [
+        {
+          "type": "application",
+          "name": "manual-source-review",
+          "description": "This CBOM was produced by direct, manual inspection of protect_engine.py, unlock_engine.py, pdf_engine.py, and a project-wide grep for cryptography-related stdlib/third-party usage (hashlib, hmac, ssl, Crypto, cryptography, base64, md5/sha, rsa/aes/rc4, pbkdf, random.*, network modules). No automated CBOM-generation tool was run against this codebase -- none of the general-purpose CBOM scanners available to the author have first-class support for detecting PDF-library encryption usage (as opposed to direct calls to hashlib/cryptography/OpenSSL), so this is evidence-based manual extraction, not an automated-tool report. Confidence levels and exact source citations are given per finding below."
+        }
+      ]
+    },
+    "component": {
+      "type": "application",
+      "bom-ref": "app-pdf-merger-compressor",
+      "name": "PDF Merger & Compressor",
+      "version": "1.0.0"
+    }
+  },
+  "components": [
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto-aes256-pdf-security-handler",
+      "name": "AES-256 (PDF Standard Security Handler)",
+      "description": "VERIFIED (high confidence) from source: protect_engine.py defines `ENCRYPTION_METHOD = pymupdf.PDF_ENCRYPT_AES_256` (protect_engine.py, module-level constant, read from the installed pymupdf library's own enum rather than a hardcoded integer -- confirmed by the project's own test, tests/test_protect_engine.py line ~224: `assert protect_engine.ENCRYPTION_METHOD == pymupdf.PDF_ENCRYPT_AES_256`). protect_engine.protect_pdf() calls `doc.save(output_path, encryption=ENCRYPTION_METHOD, user_pw=user_password, owner_pw=owner_password, permissions=permissions, ...)` to ENCRYPT. unlock_engine.unlock_pdf() calls `doc.authenticate(password)` then re-saves with `encryption=pymupdf.PDF_ENCRYPT_NONE` to DECRYPT/strip protection. The project's own protect_engine.py docstring states this choice is deliberate: PyMuPDF also exposes PDF_ENCRYPT_RC4_40, PDF_ENCRYPT_RC4_128, and PDF_ENCRYPT_AES_128 but the code never uses them -- AES-256 is the only encryption method this application ever applies. UNVERIFIED FROM THIS REPOSITORY (medium/low confidence, spec-derived): the actual AES block-cipher mode, padding scheme, and key-derivation-from-password algorithm are implemented inside the MuPDF C library (bundled in the PyMuPDF wheel; see the companion SBOM's pkg:generic/mupdf component), not in any Python source file in this project, so they could not be confirmed by reading this codebase. The `mode`, `padding`, and `classicalSecurityLevel` fields below reflect what ISO 32000-2 / PDF 2.0 (and the Adobe Supplement for AESV3 under PDF 1.7) publicly specify for the PDF 'AESV3' / revision-6 standard security handler -- CBC mode with PKCS#7-style padding and a SHA-256-based key-derivation function -- cited as published-specification behavior, not independently verified against MuPDF's own C source (which is outside this repository).",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "block-cipher",
+          "parameterSetIdentifier": "256",
+          "mode": "cbc",
+          "padding": "pkcs7",
+          "cryptoFunctions": ["encrypt", "decrypt"],
+          "classicalSecurityLevel": 256,
+          "executionEnvironment": "software-plain-ram",
+          "implementationPlatform": "generic"
+        }
+      },
+      "properties": [
+        {
+          "name": "cbom:confidence:algorithmIdentity",
+          "value": "VERIFIED -- ENCRYPTION_METHOD = pymupdf.PDF_ENCRYPT_AES_256, protect_engine.py; call sites in protect_engine.protect_pdf() (encrypt) and unlock_engine.unlock_pdf() (decrypt/strip)."
+        },
+        {
+          "name": "cbom:confidence:modePaddingKdf",
+          "value": "UNVERIFIED FROM SOURCE -- derived from the public ISO 32000-2 PDF standard security handler specification for AESV3/R6, not from reading MuPDF's own C implementation (not present in this repository)."
+        },
+        {
+          "name": "cbom:unusedAlternatives",
+          "value": "pymupdf.PDF_ENCRYPT_RC4_40, PDF_ENCRYPT_RC4_128, and PDF_ENCRYPT_AES_128 are available in the pymupdf API surface but were confirmed, by full-project grep, to never be referenced anywhere in this codebase outside of explanatory comments in protect_engine.py listing them as options NOT chosen."
+        },
+        {
+          "name": "cbom:keyLengthConstraint",
+          "value": "protect_engine.py: MAX_PASSWORD_LENGTH = 40 (both user and owner passwords are rejected above 40 characters before reaching pymupdf). This is a PDF standard security handler constraint on the password used for key derivation, verified directly from source."
+        },
+        {
+          "name": "cbom:accessControlConfig",
+          "value": "protect_engine.py: DEFAULT_PERMISSIONS = 4095, built from pymupdf.PDF_PERM_PRINT | PDF_PERM_COPY | PDF_PERM_MODIFY (and other standard permission bits) -- the PDF permissions bitmask passed to doc.save(permissions=...). This is a standard-security-handler access-control configuration associated with the encrypted document (enforced by compliant PDF readers, not a cryptographic primitive itself), verified directly from source."
+        },
+        {
+          "name": "cbom:defaultRejectEncrypted",
+          "value": "pdf_engine.validate_pdf(path, allow_encrypted=False) (the default used by every tool EXCEPT Unlock PDF) raises EncryptedPDFError whenever `doc.is_encrypted and doc.needs_pass` -- i.e. every other tool in the application refuses to open a password-protected PDF rather than attempting to bypass or guess its password. Verified directly from source, pdf_engine.py lines ~114-170."
+        },
+        {
+          "name": "cbom:implementingLibrary",
+          "value": "pymupdf (Python binding) / MuPDF (bundled C library, Artifex Software) -- see sbom.cdx.json components pkg:pypi/pymupdf and pkg:generic/mupdf. This project's own Python source does not implement AES itself anywhere."
+        }
+      ]
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto-secrets-csprng",
+      "name": "Python secrets module (CSPRNG) -- owner password generation",
+      "description": "VERIFIED from source: protect_engine.py calls `owner_password = secrets.token_urlsafe(24)` to generate a random owner (permissions) password for every protect_pdf() call -- the end user never supplies or sees this value. Python's `secrets` module is documented (CPython standard library) to be suitable for managing secrets such as passwords and is backed by the OS's cryptographically secure random source (os.urandom(), e.g. getrandom()/BCryptGenRandom() depending on platform). The specific OS-level CSPRNG backing `os.urandom()` on any given deployment target was NOT independently verified here -- that is a property of the host operating system, not of this project's source.",
+      "cryptoProperties": {
+        "assetType": "algorithm",
+        "algorithmProperties": {
+          "primitive": "drbg",
+          "cryptoFunctions": ["generate"],
+          "executionEnvironment": "software-plain-ram",
+          "implementationPlatform": "generic"
+        }
+      },
+      "properties": [
+        {
+          "name": "cbom:confidence",
+          "value": "VERIFIED -- exact call site: protect_engine.py, `owner_password = secrets.token_urlsafe(24)`."
+        },
+        {
+          "name": "cbom:entropyBits",
+          "value": "192 (24 random bytes, per the documented semantics of secrets.token_urlsafe(nbytes) in the Python standard library -- not independently re-derived from CPython's own source in this review, cited as documented stdlib behavior)."
+        },
+        {
+          "name": "cbom:lifecycle",
+          "value": "VERIFIED from source: the generated owner password is used once (passed into doc.save(owner_pw=...)), then explicitly deleted with `del owner_password` immediately after use, and is never logged, returned to the caller, written to disk, or displayed in the UI (verified: no reference to the owner_password variable after the del statement, and no logging call anywhere in protect_engine.py includes it)."
+        }
+      ]
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto-material-user-password",
+      "name": "PDF user (open) password",
+      "description": "VERIFIED from source: a password string supplied via the application's UI (ui.py) is passed through protect_engine.protect_pdf() as `user_password` to `doc.save(..., user_pw=user_password, ...)`. This becomes the PDF 'open' password a reader must supply to view the document. The application performs only length validation (<=40 chars, matching MAX_PASSWORD_LENGTH) and a non-empty check before use -- no complexity/strength policy is enforced by this project's own code (any strength policy beyond that is whatever the user chooses). Not persisted by the application: no log statement, temp file, or output artifact in protect_engine.py/pdf_engine.py was found (by grep) to write this value anywhere other than the single doc.save() call.",
+      "cryptoProperties": {
+        "assetType": "related-crypto-material",
+        "relatedCryptoMaterialProperties": {
+          "type": "password",
+          "format": "string (UTF-8, PDF standard security handler password, <= 40 characters enforced by this application)"
+        }
+      },
+      "properties": [
+        {
+          "name": "cbom:confidence",
+          "value": "VERIFIED -- parameter flow traced from ui.py's password entry through protect_engine.protect_pdf()'s `user_password` argument to doc.save(user_pw=...)."
+        },
+        {
+          "name": "cbom:securedBy",
+          "value": "AES-256 (see crypto-aes256-pdf-security-handler) -- used as the PDF standard security handler's user-password key-derivation input; see that component's notes on the KDF itself being unverified from this repository's source."
+        }
+      ]
+    },
+    {
+      "type": "cryptographic-asset",
+      "bom-ref": "crypto-material-owner-password",
+      "name": "PDF owner (permissions) password",
+      "description": "VERIFIED from source: automatically generated per crypto-secrets-csprng above, used only as the `owner_pw` argument to doc.save(), and discarded immediately after. Unlike the user password, this value is never exposed to or requested from the end user at all -- see crypto-secrets-csprng's 'cbom:lifecycle' property.",
+      "cryptoProperties": {
+        "assetType": "related-crypto-material",
+        "relatedCryptoMaterialProperties": {
+          "type": "password",
+          "size": 192,
+          "format": "URL-safe Base64 text (output of secrets.token_urlsafe(24))"
+        }
+      },
+      "properties": [
+        {
+          "name": "cbom:confidence",
+          "value": "VERIFIED -- protect_engine.py, single call site, see crypto-secrets-csprng component."
+        },
+        {
+          "name": "cbom:securedBy",
+          "value": "AES-256 (see crypto-aes256-pdf-security-handler)."
+        }
+      ]
+    }
+  ],
+  "dependencies": [
+    {
+      "ref": "crypto-material-user-password",
+      "dependsOn": ["crypto-aes256-pdf-security-handler"]
+    },
+    {
+      "ref": "crypto-material-owner-password",
+      "dependsOn": ["crypto-aes256-pdf-security-handler", "crypto-secrets-csprng"]
+    }
+  ]
+}
