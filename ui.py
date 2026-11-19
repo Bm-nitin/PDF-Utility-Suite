@@ -63,6 +63,7 @@ it calls into pdf_engine.py and file_manager.py for that.
 from __future__ import annotations
 
 import queue
+import sys
 import threading
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -9319,6 +9320,11 @@ class MainWindow:
 
 def run() -> None:
     """Entry point used by app.py to start the GUI event loop."""
+    if sys.platform == "win32":
+        import wpf_app
+
+        wpf_app.run()
+        return
     root = tk.Tk()
     MainWindow(root, settings_path=ui_theme.settings_path())
     root.mainloop()

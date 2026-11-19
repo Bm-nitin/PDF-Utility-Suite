@@ -1,0 +1,174 @@
+import json
+import sys
+
+import pymupdf
+import pytest
+from PIL import Image
+
+import app
+import ui_theme
+import wpf_app
+import wpf_backend
+
+
+def _make_pdf(path, texts):
+    with pymupdf.open() as document:
+        for text in texts:
+            document.new_page().insert_text((72, 72), text)
+        document.save(path)
+
+
+_UI_CHECK = r"""
+$window.ShowActivated = $false
+$window.ShowInTaskbar = $false
+$window.WindowStartupLocation = 'Manual'
+$window.Left = -20000
+$window.Top = -20000
+$files = $env:PDF_WPF_TEST_FILES | ConvertFrom-Json
+
+function Choose-SavePath([string]$suggestion) { return $files.output }
+
+function QA-Import([string]$tool, $paths) {
+    $ui.Navigation[$tool].IsChecked = $true
+    $ui.Busy = $true
+    Update-Controls
+    Send-Request @{ action = 'import'; tool = $tool; paths = @($paths); existing = @() } $ui.Active
+}
+
+function QA-MoveFirstToLast {
+    $window.UpdateLayout()
+    $first = $FileList.ItemContainerGenerator.ContainerFromIndex(0)
+    $neighbor = $FileList.ItemContainerGenerator.ContainerFromIndex(1)
+    $source = $ui.Active.Rows[0]
+    if (-not $first -or -not $neighbor) { throw 'The reorderable rows were not rendered.' }
+    $press = $first.TranslatePoint([Windows.Point]::new(14, 24), $FileList)
+    Start-RowDrag $first $press
+    $target = $ui.Active.Rows.Count - 1
+    Update-RowDrag ([Windows.Point]::new($press.X, $press.Y + $target * $drag.Step))
+    if ($drag.Slot -ne $target -or $FloatingContent.Content -ne $source -or
+        $ReorderOverlay.Visibility -ne 'Visible' -or $first.Opacity -ne 0 -or
+        $drag.Offsets[$neighbor] -ne -$drag.Step -or $ui.Active.Rows[0] -ne $source) {
+        throw 'The production drag did not display the floating row and shift its neighbor.'
+    }
+    End-RowDrag $true
+    if ($ui.Active.Rows[$target] -ne $source -or $ReorderOverlay.Visibility -ne 'Collapsed') {
+        throw 'The production drop did not commit the new order.'
+    }
+}
+
+function Wait-ForPreview {
+    return ($ui.Active.Rows.Count -ge 2 -and $null -ne $ui.Active.Rows[0].Thumbnail)
+}
+
+$qaState = @{ Step = 0; Start = [DateTime]::UtcNow }
+$qa = [Windows.Threading.DispatcherTimer]::new()
+$qa.Interval = [TimeSpan]::FromMilliseconds(40)
+$qa.Add_Tick({
+    if (([DateTime]::UtcNow - $qaState.Start).TotalSeconds -gt 25) {
+        throw "WPF test timed out at step $($qaState.Step). $($StatusText.Text)"
+    }
+    if (-not $ui.Ready -or $ui.Busy) { return }
+    switch ($qaState.Step) {
+        0 {
+            if ($ui.States.Count -ne 12 -or $ui.Active.Tool.id -ne 'merge_compress') {
+                throw 'The application did not register all twelve tools.'
+            }
+            foreach ($id in $ui.States.Keys) {
+                $ui.Navigation[$id].IsChecked = $true
+                if ($ui.Active.Tool.id -ne $id -or $Options.Children.Count -lt 1) {
+                    throw "Could not display $id."
+                }
+            }
+            QA-Import 'merge_compress' $files.merge
+            $qaState.Step = 1
+        }
+        1 {
+            if ($ui.Active.Rows.Count -ne 3) { throw $StatusText.Text }
+            QA-MoveFirstToLast
+            Write-Option 'mode' 'merge'
+            Update-Controls
+            $RunAction.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+            $qaState.Step = 2
+        }
+        2 {
+            if (-not [IO.File]::Exists($files.output)) { throw $StatusText.Text }
+            QA-Import 'organize_pages' @($files.output)
+            $qaState.Step = 3
+        }
+        3 {
+            if (-not (Wait-ForPreview)) { return }
+            QA-MoveFirstToLast
+            if ($ui.Active.Values.order -ne '2, 3, 1') { throw 'Dragging pages did not update the order field.' }
+            QA-Import 'images_to_pdf' $files.images
+            $qaState.Step = 4
+        }
+        4 {
+            if (-not (Wait-ForPreview)) { return }
+            QA-MoveFirstToLast
+            QA-Import 'pdf_to_images' @($files.output)
+            $qaState.Step = 5
+        }
+        5 {
+            if (-not (Wait-ForPreview)) { return }
+            if (Can-Reorder) { throw 'The PDF-to-images list should select pages.' }
+            [void]$FileList.SelectedItems.Add($ui.Active.Rows[1])
+            if ($ui.Active.Values.scope -ne 'selected' -or $ui.Active.Values.pages -ne '2') {
+                throw 'The image-export page selection did not update.'
+            }
+            $SettingsButton.IsChecked = $true
+            if ($Workspace.Visibility -ne 'Collapsed' -or $SettingsView.Visibility -ne 'Visible' -or
+                $window.OwnedWindows.Count) { throw 'Settings did not stay inside the main window.' }
+            $DarkTheme.IsChecked = $true
+            if ($window.Resources['Canvas'].Color.ToString() -ne '#FF0E1522') { throw 'Dark theme did not apply.' }
+            $CheckUpdates.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+            $qaState.Step = 6
+        }
+        6 {
+            if ($ui.Updating) { return }
+            if ($UpdateStatus.Text -notlike '*2.0.0*' -or $OpenRelease.Visibility -ne 'Visible') {
+                throw 'The update result was not displayed inline.'
+            }
+            $ui.Navigation.merge_compress.IsChecked = $true
+            if ($ui.Active.Rows.Count -ne 3 -or $ui.Active.Rows[2].Name -ne 'Résumé.pdf') {
+                throw 'Settings navigation lost the imported file order.'
+            }
+            $qa.Stop()
+            $window.Close()
+        }
+    }
+})
+$qa.Start()
+Start-Interface
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The WPF interface requires Windows.")
+def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch):
+    names = ["Résumé", "Second", "Third"]
+    pdfs = [tmp_path / f"{name}.pdf" for name in names]
+    for path, title in zip(pdfs, ["First", "Second", "Third"]):
+        _make_pdf(path, [title])
+    images = [tmp_path / "blue.png", tmp_path / "red.png"]
+    for path in images:
+        with Image.new("RGB", (40, 32), path.stem) as image:
+            image.save(path)
+    output = tmp_path / "merged.pdf"
+    monkeypatch.setenv("PDF_WPF_TEST_FILES", json.dumps(
+        {"merge": pdfs, "images": images, "output": output}, default=str,
+    ))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(wpf_backend.update_checker, "check_for_update", lambda: {
+        "update_available": True, "version": "2.0.0",
+        "release_url": "https://github.com/Bm-nitin/PDF-Utility-Suite/releases/tag/v2.0.0",
+    })
+
+    open_wpf = wpf_app.run
+    monkeypatch.setattr(wpf_app, "run", lambda: open_wpf(entry=_UI_CHECK))
+    monkeypatch.setattr(app, "_setup_logging", lambda: None)
+    monkeypatch.setattr(app, "TEMP_DIR", tmp_path / "temp")
+    monkeypatch.setattr(app, "OUTPUT_DIR", tmp_path / "output")
+    assert app.main() == 0
+
+    with pymupdf.open(output) as document:
+        assert [page.get_text().strip() for page in document] == ["Second", "Third", "First"]
+    assert ui_theme.load_theme(tmp_path / "PDFUtilitySuite" / "settings.json") == "dark"

@@ -40,7 +40,7 @@ The application is being developed around three principles:
 2. **Correctness over superficial optimization:** An output file is useful only if its content remains intact.
 3. **Practical usability:** Make common document operations accessible through a straightforward desktop interface.
 
-The application is built with Python and Tkinter, with PyMuPDF handling core PDF operations.
+The Windows app uses WPF for the interface and Python with PyMuPDF for document processing.
 
 ## Features
 
@@ -84,7 +84,7 @@ Development, dependency installation, updates, and downloading the application m
 | Technology | Purpose |
 |---|---|
 | Python | Application logic and PDF-processing workflows |
-| Tkinter | Desktop graphical user interface |
+| WPF | Windows desktop interface, hosted by Windows PowerShell |
 | PyMuPDF | PDF reading, editing, rendering, and optimization |
 | Pillow | Image handling and image-processing support |
 | pytest | Automated testing and regression detection |
@@ -98,7 +98,7 @@ The application separates interface responsibilities from document processing.
 
 ### Desktop interface
 
-The Tkinter interface provides file selection, operation controls, processing status, and progress feedback.
+The WPF interface provides all 12 tool workspaces. Merge & Compress, Organize Pages, and Images → PDF show the new order as you drag. The Settings page is inside the main window and includes Light and Dark themes, the installed version, and Check for Updates.
 
 ### PDF processing engine
 
@@ -122,7 +122,7 @@ The Tkinter interface provides file selection, operation controls, processing st
 
 ### Background processing
 
-Long-running operations are designed to execute outside the main UI thread. A queue and main-thread scheduling coordinate progress and results with the interface, helping keep the application responsive during processing.
+The WPF window exchanges commands, progress, and results with the Python process over local pipes. Document processing and thumbnail rendering run in sequence outside the UI thread.
 
 ## Reliability and Security
 
@@ -166,7 +166,7 @@ The goal is to introduce further size reduction only when the implementation can
 
 ### Prerequisites
 
-- Windows
+- Windows with Windows PowerShell 5.1
 - Python 3.10 or a compatible version supported by the project dependencies
 - Git
 - A terminal such as Windows PowerShell
