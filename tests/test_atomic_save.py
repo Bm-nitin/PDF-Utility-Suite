@@ -69,6 +69,45 @@ def test_merge_pdfs_leaves_no_temp_files_behind(tmp_path):
     assert leftover_temp_files == []
 
 
+@pytest.mark.parametrize("merge", [pdf_engine.merge_pdfs, pdf_engine.merge_and_compress])
+def test_merge_rejects_an_input_as_output(tmp_path, merge):
+    first = tmp_path / "first.pdf"
+    second = tmp_path / "second.pdf"
+    _make_pdf(first, pages=2)
+    _make_pdf(second, pages=3)
+    original = second.read_bytes()
+
+    with pytest.raises(pdf_engine.PDFEngineError, match="different from the input"):
+        merge([first, second], second)
+
+    assert second.read_bytes() == original
+
+
+def test_merge_rejects_an_alias_of_an_input_as_output(tmp_path):
+    source = tmp_path / "input.pdf"
+    destination = tmp_path / "alias.pdf"
+    _make_pdf(source)
+    destination.hardlink_to(source)
+    original = source.read_bytes()
+
+    with pytest.raises(pdf_engine.PDFEngineError, match="different from the input"):
+        pdf_engine.merge_pdfs([source], destination)
+
+    assert destination.samefile(source)
+    assert source.read_bytes() == original
+
+
+def test_compress_rejects_the_input_as_output(tmp_path):
+    source = tmp_path / "input.pdf"
+    _make_pdf(source)
+    original = source.read_bytes()
+
+    with pytest.raises(pdf_engine.PDFEngineError, match="different from the input"):
+        pdf_engine.compress_pdf(source, source)
+
+    assert source.read_bytes() == original
+
+
 # ---------------------------------------------------------------------------
 # Atomic behavior: simulated save failure
 # ---------------------------------------------------------------------------

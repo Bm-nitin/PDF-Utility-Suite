@@ -150,7 +150,8 @@ def save_pdf_file(
     only fills in an extension when the user types none at all -- if they
     explicitly type a different extension, Windows' native dialog leaves
     it as-is, so this is re-checked defensively here rather than trusted
-    to the dialog alone.
+    to the dialog alone. If the adjusted path already exists, confirm
+    replacement for that path.
 
     `title` defaults to the original Merge-only wording so every
     existing caller is unaffected; Phase 14 (Remove Pages) is the first
@@ -175,6 +176,9 @@ def save_pdf_file(
     path = Path(path_str)
     if path.suffix.lower() != ".pdf":
         path = path.with_name(ensure_pdf_extension(path.name))
+        # The native dialog confirmed only the original path.
+        if not confirm_overwrite_if_needed(path, parent=parent):
+            return None
     return path
 
 

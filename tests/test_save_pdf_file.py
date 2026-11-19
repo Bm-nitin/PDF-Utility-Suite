@@ -12,6 +12,8 @@ import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import file_manager
@@ -56,6 +58,20 @@ def test_corrects_wrong_extension_from_dialog(tmp_path):
         result = file_manager.save_pdf_file()
     assert result == tmp_path / "my_output.txt.pdf"
     assert result.suffix.lower() == ".pdf"
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+def test_confirms_overwrite_for_normalized_destination(tmp_path, confirm):
+    final_path = tmp_path / "existing.txt.pdf"
+    final_path.touch()
+    with patch(
+        "file_manager.filedialog.asksaveasfilename",
+        return_value=str(tmp_path / "existing.txt"),
+    ), patch("tkinter.messagebox.askyesno", return_value=confirm) as prompt:
+        result = file_manager.save_pdf_file()
+
+    assert result == (final_path if confirm else None)
+    assert final_path.name in prompt.call_args.kwargs["message"]
 
 
 def test_preserves_valid_pdf_extension_case(tmp_path):

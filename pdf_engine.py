@@ -53,6 +53,23 @@ class EncryptedPDFError(PDFEngineError):
     """Raised when a PDF requires a password we don't have."""
 
 
+def _require_separate_output(input_paths: List[Path], output_path: Path) -> None:
+    """Reject a destination that refers to any input file."""
+    for input_path in input_paths:
+        try:
+            same_file = output_path.samefile(input_path)
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            raise PDFEngineError(
+                f"Could not check the output location '{output_path}'."
+            ) from exc
+        if same_file:
+            raise PDFEngineError(
+                f"Choose an output file different from the input '{input_path.name}'."
+            )
+
+
 # ---------------------------------------------------------------------------
 # Atomic, crash-safe output writing
 # ---------------------------------------------------------------------------
@@ -144,6 +161,8 @@ def validate_pdf(path: Path, allow_encrypted: bool = False) -> None:
         ) from exc
 
     try:
+        if not doc.is_pdf:
+            raise InvalidPDFError(f"'{path.name}' is not a PDF file.")
         if doc.is_encrypted and not allow_encrypted:
             # needs_pass is True if a password is actually required to
             # open pages (some "encrypted" PDFs have an empty owner
@@ -230,6 +249,7 @@ def merge_pdfs(
     if not input_files:
         raise PDFEngineError("No files to merge.")
 
+    _require_separate_output(input_files, output_path)
     total = len(input_files)
     merged = pymupdf.open()  # new, empty document
     try:
@@ -344,6 +364,7 @@ def compress_pdf(
     # internal error>" that could otherwise surface from deeper inside
     # this function for the same underlying problem.
     validate_pdf(input_path)
+    _require_separate_output([input_path], output_path)
 
     preset = COMPRESSION_PRESETS[level]
 
@@ -453,6 +474,7 @@ def merge_and_compress(
 
     input_files = [Path(p) for p in input_files]
     output_path = Path(output_path)
+    _require_separate_output(input_files, output_path)
 
     def report(msg: str):
         if progress_callback:

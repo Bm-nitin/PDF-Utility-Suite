@@ -929,6 +929,35 @@ def test_p2i_page_thumbnails_are_generated(p2i6):
         [f"Page {n}" for n in range(1, 7)]
 
 
+def test_p2i_exports_on_the_same_thread_as_pdf_thumbnails(p2i, tmp_path, monkeypatch):
+    source = _make_pdf(tmp_path / "example.pdf", pages=1)
+    threads = {}
+    render_thumbnail = thumbnail_preview.render_pdf_page_thumbnail
+    render_export = pdf_to_images_engine.render_pdf_to_images
+
+    def record_thumbnail(*args, **kwargs):
+        threads["thumbnail"] = threading.current_thread()
+        return render_thumbnail(*args, **kwargs)
+
+    def record_export(*args, **kwargs):
+        threads["export"] = threading.current_thread()
+        return render_export(*args, **kwargs)
+
+    monkeypatch.setattr(thumbnail_preview, "render_pdf_page_thumbnail", record_thumbnail)
+    monkeypatch.setattr(pdf_to_images_engine, "render_pdf_to_images", record_export)
+    _select_p2i(p2i, source)
+    _wait_thumbnails(p2i, p2i.pdf_to_images_preview_grid)
+
+    p2i.pdf_to_images_output_dir = tmp_path
+    with patch("ui.messagebox.showinfo"), patch("ui.messagebox.showerror"):
+        p2i._on_pdf_to_images_execute_clicked()
+        assert _pump_until(p2i, lambda: not p2i.pdf_to_images_in_progress)
+
+    assert list(tmp_path.glob("example_page_*.png"))
+    assert threads["thumbnail"] is threads["export"]
+    assert threads["export"] is not threading.main_thread()
+
+
 def test_p2i_all_pages_mode_selects_every_thumbnail(p2i6):
     win, grid, _src = p2i6
     assert win.pdf_to_images_all_pages_var.get() is True

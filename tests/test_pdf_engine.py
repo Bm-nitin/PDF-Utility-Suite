@@ -9,6 +9,9 @@ Phase 11 per the development plan.
 import sys
 from pathlib import Path
 
+import pytest
+from PIL import Image
+
 # Allow running tests directly without installing the package.
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -25,3 +28,13 @@ def test_module_imports():
     assert hasattr(pdf_engine, "merge_pdfs")
     assert hasattr(pdf_engine, "compress_pdf")
     assert hasattr(pdf_engine, "merge_and_compress")
+
+
+@pytest.mark.parametrize("allow_encrypted", [False, True])
+def test_validate_pdf_rejects_a_renamed_image(tmp_path, allow_encrypted):
+    disguised = tmp_path / "image.pdf"
+    with Image.new("RGB", (8, 8)) as image:
+        image.save(disguised, format="PNG")
+
+    with pytest.raises(pdf_engine.InvalidPDFError, match="is not a PDF file"):
+        pdf_engine.validate_pdf(disguised, allow_encrypted=allow_encrypted)

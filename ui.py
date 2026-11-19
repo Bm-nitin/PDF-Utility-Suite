@@ -79,6 +79,7 @@ import organize_engine
 import page_numbers_engine
 import pdf_engine
 import pdf_to_images_engine
+import pdf_worker
 import protect_engine
 import remove_pages_engine
 import rotate_engine
@@ -1938,9 +1939,9 @@ class MainWindow:
         cached = self._shared_thumbnail_cache.get(cache_key)
         if cached is not None:
             return cached
-        data = thumbnail_preview.render_pdf_page_thumbnail(
-            source.path, item.thumb_key, size,
-        )
+        data = pdf_worker.submit(
+            thumbnail_preview.render_pdf_page_thumbnail, source.path, item.thumb_key, size,
+        ).result()
         self._shared_thumbnail_cache.put(cache_key, data)
         return data
 
@@ -4442,9 +4443,9 @@ class MainWindow:
         cached = self._shared_thumbnail_cache.get(cache_key)
         if cached is not None:
             return cached
-        data = thumbnail_preview.render_pdf_page_thumbnail(
-            source.path, item.thumb_key, size,
-        )
+        data = pdf_worker.submit(
+            thumbnail_preview.render_pdf_page_thumbnail, source.path, item.thumb_key, size,
+        ).result()
         self._shared_thumbnail_cache.put(cache_key, data)
         return data
 
@@ -4994,14 +4995,10 @@ class MainWindow:
         Watermark's own controls -- Phase 21, Images -> PDF's own
         controls -- Phase 22, and PDF -> Images' own controls -- Phase
         23)
-        agrees on for "is anything running right now" -- the Phase 9
-        "one consistent operation-state mechanism" requirement, now
-        covering all twelve tool workspaces. Every tool is treated as
-        mutually exclusive with every other tool too (not just within
-        itself): only one background PDF operation runs at a time
-        app-wide, which is the simplest, safest policy and avoids two
-        threads touching PyMuPDF concurrently (see the Phase 5
-        delivery notes on multi-threaded PyMuPDF fragility).
+        agrees on for "is anything running right now" across all twelve
+        tool workspaces. This controls when users can start another
+        operation. The shared PDF worker serializes PyMuPDF access,
+        including thumbnail renders.
         """
         return (
             self._import_in_progress
@@ -5090,12 +5087,7 @@ class MainWindow:
 
         existing_paths = {f.path.resolve() for f in self.state.files}
 
-        worker = threading.Thread(
-            target=self._import_worker,
-            args=(paths, existing_paths),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._import_worker, paths, existing_paths)
 
         self.root.after(80, self._poll_import_queue)
 
@@ -5716,12 +5708,7 @@ class MainWindow:
         self.progress_bar.configure(mode="indeterminate")
         self.progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._merge_worker,
-            args=(input_paths, output_path),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._merge_worker, input_paths, output_path)
 
         self.root.after(80, self._poll_merge_queue)
 
@@ -5875,12 +5862,7 @@ class MainWindow:
         self.progress_bar.configure(mode="indeterminate")
         self.progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._compress_single_worker,
-            args=(input_path, output_path, level),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._compress_single_worker, input_path, output_path, level)
         self.root.after(80, self._poll_compress_queue)
 
     def _compress_single_worker(
@@ -5929,12 +5911,7 @@ class MainWindow:
         self.progress_bar.configure(mode="indeterminate")
         self.progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._compress_batch_worker,
-            args=(input_paths, output_dir, level),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._compress_batch_worker, input_paths, output_dir, level)
         self.root.after(80, self._poll_compress_queue)
 
     def _compress_batch_worker(
@@ -6146,12 +6123,7 @@ class MainWindow:
         self.progress_bar.configure(mode="indeterminate")
         self.progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._merge_compress_worker,
-            args=(input_paths, output_path, level),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._merge_compress_worker, input_paths, output_path, level)
         self.root.after(80, self._poll_merge_compress_queue)
 
     def _merge_compress_worker(
@@ -6292,10 +6264,7 @@ class MainWindow:
         self.split_progress_bar.configure(mode="indeterminate")
         self.split_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._split_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._split_import_worker, path)
         self.root.after(80, self._poll_split_import_queue)
 
     def _split_import_worker(self, path: Path) -> None:
@@ -6426,12 +6395,7 @@ class MainWindow:
         self.split_progress_bar.configure(mode="indeterminate")
         self.split_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._split_worker,
-            args=(source_path, groups, include_range_label, output_dir),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._split_worker, source_path, groups, include_range_label, output_dir)
         self.root.after(80, self._poll_split_queue)
 
     def _split_worker(
@@ -6547,10 +6511,7 @@ class MainWindow:
         self.remove_pages_progress_bar.configure(mode="indeterminate")
         self.remove_pages_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._remove_pages_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._remove_pages_import_worker, path)
         self.root.after(80, self._poll_remove_pages_import_queue)
 
     def _remove_pages_import_worker(self, path: Path) -> None:
@@ -6680,12 +6641,7 @@ class MainWindow:
         self.remove_pages_progress_bar.configure(mode="indeterminate")
         self.remove_pages_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._remove_pages_worker,
-            args=(source_path, pages_to_remove, output_path),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._remove_pages_worker, source_path, pages_to_remove, output_path)
         self.root.after(80, self._poll_remove_pages_queue)
 
     def _remove_pages_worker(
@@ -6803,10 +6759,7 @@ class MainWindow:
         self.extract_progress_bar.configure(mode="indeterminate")
         self.extract_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._extract_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._extract_import_worker, path)
         self.root.after(80, self._poll_extract_import_queue)
 
     def _extract_import_worker(self, path: Path) -> None:
@@ -6937,12 +6890,7 @@ class MainWindow:
         self.extract_progress_bar.configure(mode="indeterminate")
         self.extract_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._extract_worker,
-            args=(source_path, page_indices, output_path),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._extract_worker, source_path, page_indices, output_path)
         self.root.after(80, self._poll_extract_queue)
 
     def _extract_worker(
@@ -7061,10 +7009,7 @@ class MainWindow:
         self.organize_progress_bar.configure(mode="indeterminate")
         self.organize_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._organize_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._organize_import_worker, path)
         self.root.after(80, self._poll_organize_import_queue)
 
     def _organize_import_worker(self, path: Path) -> None:
@@ -7191,12 +7136,7 @@ class MainWindow:
         self.organize_progress_bar.configure(mode="indeterminate")
         self.organize_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._organize_worker,
-            args=(source_path, page_order, output_path),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._organize_worker, source_path, page_order, output_path)
         self.root.after(80, self._poll_organize_queue)
 
     def _organize_worker(
@@ -7314,10 +7254,7 @@ class MainWindow:
         self.rotate_progress_bar.configure(mode="indeterminate")
         self.rotate_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._rotate_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._rotate_import_worker, path)
         self.root.after(80, self._poll_rotate_import_queue)
 
     def _rotate_import_worker(self, path: Path) -> None:
@@ -7459,12 +7396,7 @@ class MainWindow:
         self.rotate_progress_bar.configure(mode="indeterminate")
         self.rotate_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._rotate_worker,
-            args=(source_path, rotations, output_path),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._rotate_worker, source_path, rotations, output_path)
         self.root.after(80, self._poll_rotate_queue)
 
     def _rotate_worker(
@@ -7582,10 +7514,7 @@ class MainWindow:
         self.protect_progress_bar.configure(mode="indeterminate")
         self.protect_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._protect_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._protect_import_worker, path)
         self.root.after(80, self._poll_protect_import_queue)
 
     def _protect_import_worker(self, path: Path) -> None:
@@ -7758,12 +7687,7 @@ class MainWindow:
         self.protect_progress_bar.configure(mode="indeterminate")
         self.protect_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._protect_worker,
-            args=(source_path, password, permissions, output_path),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._protect_worker, source_path, password, permissions, output_path)
         self.root.after(80, self._poll_protect_queue)
 
     def _protect_worker(
@@ -7899,10 +7823,7 @@ class MainWindow:
         self.unlock_progress_bar.configure(mode="indeterminate")
         self.unlock_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._unlock_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._unlock_import_worker, path)
         self.root.after(80, self._poll_unlock_import_queue)
 
     def _unlock_import_worker(self, path: Path) -> None:
@@ -8055,12 +7976,7 @@ class MainWindow:
         self.unlock_progress_bar.configure(mode="indeterminate")
         self.unlock_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._unlock_worker,
-            args=(source_path, password, output_path),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._unlock_worker, source_path, password, output_path)
         self.root.after(80, self._poll_unlock_queue)
 
     def _unlock_worker(
@@ -8191,10 +8107,7 @@ class MainWindow:
         self.page_numbers_progress_bar.configure(mode="indeterminate")
         self.page_numbers_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._page_numbers_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._page_numbers_import_worker, path)
         self.root.after(80, self._poll_page_numbers_import_queue)
 
     def _page_numbers_import_worker(self, path: Path) -> None:
@@ -8338,15 +8251,11 @@ class MainWindow:
         self.page_numbers_progress_bar.configure(mode="indeterminate")
         self.page_numbers_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._page_numbers_worker,
-            args=(
-                source_path, output_path, page_indices, start_number,
-                position, font_size, margin,
-            ),
-            daemon=True,
+        pdf_worker.submit(
+            self._page_numbers_worker,
+            source_path, output_path, page_indices, start_number,
+            position, font_size, margin,
         )
-        worker.start()
         self.root.after(80, self._poll_page_numbers_queue)
 
     def _page_numbers_worker(
@@ -8465,10 +8374,7 @@ class MainWindow:
         self.watermark_progress_bar.configure(mode="indeterminate")
         self.watermark_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._watermark_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._watermark_import_worker, path)
         self.root.after(80, self._poll_watermark_import_queue)
 
     def _watermark_import_worker(self, path: Path) -> None:
@@ -8621,15 +8527,11 @@ class MainWindow:
         self.watermark_progress_bar.configure(mode="indeterminate")
         self.watermark_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._watermark_worker,
-            args=(
-                source_path, output_path, page_indices, text, position,
-                font_size, opacity, rotation, color,
-            ),
-            daemon=True,
+        pdf_worker.submit(
+            self._watermark_worker,
+            source_path, output_path, page_indices, text, position,
+            font_size, opacity, rotation, color,
         )
-        worker.start()
         self.root.after(80, self._poll_watermark_queue)
 
     def _watermark_worker(
@@ -8907,12 +8809,7 @@ class MainWindow:
         self.images_to_pdf_progress_bar.configure(mode="indeterminate")
         self.images_to_pdf_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._images_to_pdf_worker,
-            args=(input_paths, output_path, page_size, margin),
-            daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._images_to_pdf_worker, input_paths, output_path, page_size, margin)
         self.root.after(80, self._poll_images_to_pdf_queue)
 
     def _images_to_pdf_worker(
@@ -9028,10 +8925,7 @@ class MainWindow:
         self.pdf_to_images_progress_bar.configure(mode="indeterminate")
         self.pdf_to_images_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._pdf_to_images_import_worker, args=(path,), daemon=True,
-        )
-        worker.start()
+        pdf_worker.submit(self._pdf_to_images_import_worker, path)
         self.root.after(80, self._poll_pdf_to_images_import_queue)
 
     def _pdf_to_images_import_worker(self, path: Path) -> None:
@@ -9199,12 +9093,10 @@ class MainWindow:
         self.pdf_to_images_progress_bar.configure(mode="indeterminate")
         self.pdf_to_images_progress_bar.start(12)
 
-        worker = threading.Thread(
-            target=self._pdf_to_images_worker,
-            args=(source_path, output_dir, page_indices, image_format, dpi, jpeg_quality),
-            daemon=True,
+        pdf_worker.submit(
+            self._pdf_to_images_worker,
+            source_path, output_dir, page_indices, image_format, dpi, jpeg_quality,
         )
-        worker.start()
         self.root.after(80, self._poll_pdf_to_images_queue)
 
     def _pdf_to_images_worker(
