@@ -53,6 +53,9 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pymupdf
 
+from drag_reorder import Slide
+import ui_theme
+
 logger = logging.getLogger(__name__)
 
 #: Default thumbnail width/height bound, in pixels -- within the
@@ -294,8 +297,10 @@ class PreviewGrid(tk.Frame):
         on_delete: Optional[Callable[[Any], None]] = None,
         cache: Optional[ThumbnailCache] = None,
         bg: str = _COLOR_BG,
+        theme: str = "light",
     ):
         super().__init__(parent, bg=bg)
+        self._theme = theme
         self.thumb_size = thumb_size
         self.card_width = thumb_size + 24
         self.card_height = thumb_size + 46
@@ -322,19 +327,36 @@ class PreviewGrid(tk.Frame):
 
         self._press_item: Optional[Any] = None
         self._press_xy = (0, 0)
+        self._grab_xy = (0, 0)
         self._dragging = False
         self._drag_target_index: Optional[int] = None
+        self._slide = Slide(self)
 
-        self._insertion_indicator = tk.Frame(self, bg=_COLOR_ACCENT, width=3)
+        self._insertion_indicator = tk.Frame(
+            self, bg=self._color(_COLOR_DRAG_BG), highlightthickness=1,
+            highlightbackground=self._color(_COLOR_ACCENT),
+        )
 
         self._placeholder_photo: Optional["tk.PhotoImage"] = None
 
         self.bind("<Configure>", self._on_container_configure)
         self.bind("<Destroy>", self._on_widget_destroyed)
+        self.bind("<Unmap>", lambda _event: self.cancel_drag(), add="+")
         self.bind("<Delete>", self._on_delete_key)
         self.bind("<BackSpace>", self._on_delete_key)
 
     # -- public API ---------------------------------------------------
+
+    def _color(self, light_color: str) -> str:
+        return ui_theme.color(light_color, self._theme)
+
+    def set_theme(self, theme: str) -> None:
+        self.cancel_drag()
+        ui_theme.recolor_widgets(self, self._theme, theme)
+        self._theme = theme
+        if self._placeholder_photo is not None:
+            size = self._placeholder_photo.width()
+            self._placeholder_photo.put(self._color(_COLOR_PLACEHOLDER), to=(0, 0, size, size))
 
     def set_thumbnail_loader(self, loader: Callable[[PreviewItem], bytes]) -> None:
         self._loader = loader
@@ -348,6 +370,7 @@ class PreviewGrid(tk.Frame):
         (or the tool is switched away and back) while a render was still
         in flight.
         """
+        self.cancel_drag()
         self._generation += 1
         gen = self._generation
 
@@ -452,6 +475,7 @@ class PreviewGrid(tk.Frame):
         "do not allow background timers/after callbacks to survive
         widget destruction" requirement.
         """
+        self.cancel_drag()
         self._destroyed = True
         self._generation += 1
         try:
@@ -534,29 +558,27 @@ class PreviewGrid(tk.Frame):
                 and previous is not self._placeholder_photo:
             _dispose_photo(previous)
 
-    @staticmethod
-    def _decode_photo(data: bytes) -> "tk.PhotoImage":
+    def _decode_photo(self, data: bytes) -> "tk.PhotoImage":
         try:
-            return tk.PhotoImage(data=data)
+            return tk.PhotoImage(master=self, data=data)
         except Exception:
             logger.warning("Could not decode a rendered thumbnail", exc_info=True)
-            return PreviewGrid._blank_photo()
+            return self._get_placeholder()
 
     def _get_placeholder(self) -> "tk.PhotoImage":
         if self._placeholder_photo is None:
-            self._placeholder_photo = self._blank_photo(self.thumb_size)
+            size = self.thumb_size
+            self._placeholder_photo = tk.PhotoImage(master=self, width=size, height=size)
+            self._placeholder_photo.put(self._color(_COLOR_PLACEHOLDER), to=(0, 0, size, size))
         return self._placeholder_photo
-
-    @staticmethod
-    def _blank_photo(size: int = DEFAULT_THUMBNAIL_SIZE) -> "tk.PhotoImage":
-        photo = tk.PhotoImage(width=size, height=size)
-        photo.put(_COLOR_PLACEHOLDER, to=(0, 0, size, size))
-        return photo
 
     # -- internal: layout -------------------------------------------------
 
     def _on_container_configure(self, _event=None) -> None:
-        self._layout_cards()
+        if self._dragging:
+            self.cancel_drag()
+        else:
+            self._layout_cards()
 
     def _columns(self) -> int:
         width = self.winfo_width()
@@ -570,16 +592,16 @@ class PreviewGrid(tk.Frame):
 
     def _build_card(self, item: PreviewItem) -> tk.Frame:
         card = tk.Frame(
-            self, bg=_COLOR_CARD, highlightthickness=2,
-            highlightbackground=_COLOR_BORDER, highlightcolor=_COLOR_BORDER,
+            self, bg=self._color(_COLOR_CARD), highlightthickness=2,
+            highlightbackground=self._color(_COLOR_BORDER), highlightcolor=self._color(_COLOR_BORDER),
         )
         image_label = tk.Label(
-            card, bg=_COLOR_CARD, image=self._get_placeholder(),
+            card, bg=self._color(_COLOR_CARD), image=self._get_placeholder(),
         )
         image_label.pack(pady=(6, 2))
         caption = tk.Label(
-            card, text=item.label, font=("Segoe UI", 8), bg=_COLOR_CARD,
-            fg=_COLOR_TEXT_SECONDARY, wraplength=self.thumb_size,
+            card, text=item.label, font=("Segoe UI", 8), bg=self._color(_COLOR_CARD),
+            fg=self._color(_COLOR_TEXT_SECONDARY), wraplength=self.thumb_size,
         )
         caption.pack(pady=(0, 4))
 
@@ -594,11 +616,10 @@ class PreviewGrid(tk.Frame):
         return card
 
     def _layout_cards(self) -> None:
+        self._slide.stop()
         cols = self._columns()
         for index, item in enumerate(self._items):
-            row, col = divmod(index, cols)
-            x = col * self.card_width + 6
-            y = row * self.card_height + 6
+            x, y = self._slot_position(index, cols)
             card = self._cards[item.item_id]
             card.place(
                 x=x, y=y,
@@ -609,21 +630,26 @@ class PreviewGrid(tk.Frame):
         self.configure(height=total_height)
         self._refresh_card_styles()
 
+    def _slot_position(self, index: int, cols: int) -> tuple[int, int]:
+        row, col = divmod(index, cols)
+        return col * self.card_width + 6, row * self.card_height + 6
+
     def _refresh_card_styles(self) -> None:
         for item in self._items:
             card = self._cards.get(item.item_id)
             if card is None:
                 continue
-            if item.item_id in self._selected_ids:
-                card.configure(highlightbackground=_COLOR_ACCENT, highlightcolor=_COLOR_ACCENT)
-            else:
-                card.configure(highlightbackground=_COLOR_BORDER, highlightcolor=_COLOR_BORDER)
+            color = self._color(_COLOR_ACCENT if item.item_id in self._selected_ids else _COLOR_BORDER)
+            card.configure(highlightbackground=color, highlightcolor=color)
 
     # -- internal: drag and drop -------------------------------------------
 
     def _on_press(self, item_id: Any, event: "tk.Event") -> None:
         self._press_item = item_id
         self._press_xy = (event.x_root, event.y_root)
+        card = self._cards.get(item_id)
+        if card is not None:
+            self._grab_xy = (event.x_root - card.winfo_rootx(), event.y_root - card.winfo_rooty())
         self._dragging = False
         self.focus_set()  # so a following Delete/Backspace key reaches this widget
         self.select(item_id, notify=True)
@@ -631,47 +657,41 @@ class PreviewGrid(tk.Frame):
     def _on_motion(self, item_id: Any, event: "tk.Event") -> None:
         if self._press_item != item_id or not self.reorderable:
             return
+        card = self._cards.get(item_id)
+        if card is None:
+            return
         dx = event.x_root - self._press_xy[0]
         dy = event.y_root - self._press_xy[1]
         if not self._dragging and (abs(dx) >= 6 or abs(dy) >= 6):
             self._dragging = True
-            card = self._cards.get(item_id)
-            if card is not None:
-                card.configure(bg=_COLOR_DRAG_BG)
-                card.image_label.configure(bg=_COLOR_DRAG_BG)
-                card.caption_label.configure(bg=_COLOR_DRAG_BG)
+            self._paint_card(card, self._color(_COLOR_DRAG_BG))
         if self._dragging:
             local_x = event.x_root - self.winfo_rootx()
             local_y = event.y_root - self.winfo_rooty()
             target_index = self._compute_insertion_index(local_x, local_y)
             self._show_insertion_indicator(target_index)
+            card.place_configure(x=local_x - self._grab_xy[0], y=local_y - self._grab_xy[1])
+            card.lift()
 
     def _on_release(self, item_id: Any, event: "tk.Event") -> None:
-        was_dragging = self._dragging
-        card = self._cards.get(item_id)
-        if card is not None:
-            card.configure(bg=_COLOR_CARD)
-            card.image_label.configure(bg=_COLOR_CARD)
-            card.caption_label.configure(bg=_COLOR_CARD)
-        self._hide_insertion_indicator()
-
-        if was_dragging:
+        if self._dragging:
             local_x = event.x_root - self.winfo_rootx()
             local_y = event.y_root - self.winfo_rooty()
             gap_index = self._compute_insertion_index(local_x, local_y)
-            # _compute_insertion_index() returns a GAP position in the
-            # ORIGINAL list (0 = before the first card ... N = after the
-            # last). reorder_item() takes the item's FINAL position, and
-            # removes the item before inserting -- so dropping into a gap
-            # that lies after the item's own current slot must shift down
-            # by one, or a forward drag lands one card too far.
-            ids = [item.item_id for item in self._items]
-            old_index = ids.index(item_id) if item_id in ids else 0
-            final_index = gap_index - 1 if gap_index > old_index else gap_index
+            final_index = self._final_index(item_id, gap_index)
+            self.cancel_drag()
             self.reorder_item(item_id, final_index)
+        else:
+            self._press_item = None
 
-        self._dragging = False
-        self._press_item = None
+    def _final_index(self, item_id: Any, gap_index: int) -> int:
+        old_index = self.get_order().index(item_id)
+        return gap_index - 1 if gap_index > old_index else gap_index
+
+    @staticmethod
+    def _paint_card(card: tk.Frame, color: str) -> None:
+        for widget in (card, card.image_label, card.caption_label):
+            widget.configure(bg=color)
 
     def _on_delete_key(self, _event=None) -> None:
         if not self._on_delete:
@@ -687,14 +707,13 @@ class PreviewGrid(tk.Frame):
         appearance and hides the insertion indicator; the order is left
         exactly as it was.
         """
-        if self._press_item is not None:
+        if self._dragging:
             card = self._cards.get(self._press_item)
             if card is not None:
-                card.configure(bg=_COLOR_CARD)
-                card.image_label.configure(bg=_COLOR_CARD)
-                card.caption_label.configure(bg=_COLOR_CARD)
-        self._hide_insertion_indicator()
-        self._dragging = False
+                self._paint_card(card, self._color(_COLOR_CARD))
+            self._dragging = False
+            self._hide_insertion_indicator()
+            self._layout_cards()
         self._press_item = None
 
     def _compute_insertion_index(self, local_x: int, local_y: int) -> int:
@@ -710,17 +729,22 @@ class PreviewGrid(tk.Frame):
         return max(0, min(index, len(self._items)))
 
     def _show_insertion_indicator(self, target_index: int) -> None:
+        if target_index == self._drag_target_index:
+            return
         self._drag_target_index = target_index
         cols = self._columns()
-        row, col = divmod(target_index, cols) if cols else (0, 0)
-        if col >= cols:
-            row, col = row + 1, 0
-        x = col * self.card_width + 3
-        y = row * self.card_height + 6
+        final_index = self._final_index(self._press_item, target_index)
+        x, y = self._slot_position(final_index, cols)
         self._insertion_indicator.place(
-            x=x, y=y, width=3, height=self.card_height - 12,
+            x=x, y=y, width=self.card_width - 12, height=self.card_height - 12,
         )
-        self._insertion_indicator.lift()
+        self._insertion_indicator.lower()
+        order = [item_id for item_id in self.get_order() if item_id != self._press_item]
+        order.insert(final_index, self._press_item)
+        self._slide.move([
+            (self._cards[item_id], *self._slot_position(index, cols))
+            for index, item_id in enumerate(order) if item_id != self._press_item
+        ])
 
     def _hide_insertion_indicator(self) -> None:
         self._drag_target_index = None

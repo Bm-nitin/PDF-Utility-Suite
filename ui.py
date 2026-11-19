@@ -86,10 +86,12 @@ import rotate_engine
 import split_engine
 import thumbnail_preview
 import tool_registry
+import ui_theme
 import unlock_engine
 import watermark_engine
 from config import APP_NAME, APP_VERSION
 import update_checker
+from drag_reorder import FileRowDrag
 
 # ---------------------------------------------------------------------------
 # Color palette -- clean modern light theme
@@ -106,7 +108,6 @@ COLOR_ACCENT_HOVER = "#1d4ed8"
 COLOR_ACCENT_DISABLED = "#a8c2f7"
 COLOR_DROPZONE_BORDER = "#c7cad1"
 COLOR_SECONDARY_BTN_BG = "#eef0f3"
-COLOR_SECONDARY_BTN_FG = "#1a1a1a"
 
 
 # ---------------------------------------------------------------------------
@@ -245,8 +246,11 @@ def prepare_image_import(paths: Iterable[Path]) -> Dict[str, list]:
 class MainWindow:
     """Owns the root Tk window and all widgets."""
 
-    def __init__(self, root: tk.Tk):
+    def __init__(self, root: tk.Tk, *, settings_path: Optional[Path] = None):
         self.root = root
+        self._settings_path = settings_path
+        self._theme = ui_theme.load_theme(settings_path) if settings_path else "light"
+        self._settings_window: Optional[tk.Toplevel] = None
 
         # Real application state (Phase 4+).
         self.state = models.AppState()
@@ -593,7 +597,6 @@ class MainWindow:
 
         self._configure_window()
         self._configure_styles()
-        self._build_help_menu()
         self._build_layout()
 
     # ------------------------------------------------------------------
@@ -601,40 +604,95 @@ class MainWindow:
     # ------------------------------------------------------------------
    
     # ------------------------------------------------------------------
-    # Help menu and update checker
+    # Settings and updates
     # ------------------------------------------------------------------
 
-    def _build_help_menu(self) -> None:
-        """Add application help and update-check actions."""
-        menubar = tk.Menu(self.root)
-        help_menu = tk.Menu(menubar, tearoff=False)
+    def _color(self, light_color: str) -> str:
+        return ui_theme.color(light_color, self._theme)
 
-        help_menu.add_command(
-            label="Check for Updates",
+    def _open_settings(self) -> None:
+        if self._settings_window is not None and self._settings_window.winfo_exists():
+            self._settings_window.lift()
+            self._settings_window.focus_set()
+            return
+
+        dialog = tk.Toplevel(self.root, bg=self._color(COLOR_BG))
+        self._settings_window = dialog
+        dialog.title("Settings")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        dialog.bind("<Escape>", lambda _event: dialog.destroy())
+
+        content = tk.Frame(dialog, bg=self._color(COLOR_BG), padx=24, pady=20)
+        content.pack(fill="both", expand=True)
+        tk.Label(
+            content, text="Appearance", font=("Segoe UI", 13, "bold"),
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
+        ).pack(anchor="w")
+        choices = tk.Frame(content, bg=self._color(COLOR_CARD), padx=10, pady=8)
+        choices.pack(anchor="w", pady=(6, 18))
+        self.theme_var = tk.StringVar(master=dialog, value=self._theme)
+        for theme in ui_theme.THEMES:
+            ttk.Radiobutton(
+                choices, text=theme.title(), value=theme, variable=self.theme_var,
+                style="Compression.TRadiobutton",
+                command=lambda: self._set_appearance(self.theme_var.get()),
+            ).pack(side="left", padx=(0, 12))
+
+        tk.Label(
+            content, text=f"{APP_NAME} · Version {APP_VERSION}",
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY), font=("Segoe UI", 10),
+        ).pack(anchor="w", pady=(0, 7))
+        self.settings_update_btn = ttk.Button(
+            content, text="Check for Updates", style="Secondary.TButton",
             command=self._on_check_for_updates,
         )
-        help_menu.add_separator()
-        help_menu.add_command(
-            label=f"About {APP_NAME}",
-            command=lambda: messagebox.showinfo(
-                "About",
-                f"{APP_NAME}\nVersion {APP_VERSION}",
-                parent=self.root,
-            ),
-        )
+        self.settings_update_btn.pack(anchor="w")
+        dialog.focus_set()
 
-        menubar.add_cascade(label="Help", menu=help_menu)
-        self.root.configure(menu=menubar)
+    def _set_appearance(self, theme: str) -> None:
+        if theme not in ui_theme.THEMES or theme == self._theme:
+            return
+        previous = self._theme
+        self._file_drag.cancel()
+        self._theme = theme
+        previews = (
+            self.organize_preview_grid,
+            self.images_to_pdf_preview_grid,
+            self.pdf_to_images_preview_grid,
+        )
+        ui_theme.recolor_widgets(
+            self.root, previous, theme, exclude=(*previews, self.watermark_color_swatch),
+        )
+        for preview in previews:
+            preview.set_theme(theme)
+        self._configure_styles()
+        settings = self._settings_window
+        if settings is not None and settings.winfo_exists():
+            self.theme_var.set(theme)
+        else:
+            settings = self.root
+        if self._settings_path is not None:
+            try:
+                ui_theme.save_theme(self._settings_path, theme)
+            except OSError:
+                messagebox.showwarning(
+                    "Appearance", "The theme is active for this session. It could not be saved.",
+                    parent=settings,
+                )
 
     def _on_check_for_updates(self) -> None:
         """Check GitHub for a newer published release."""
+        parent = self._settings_window
+        if parent is None or not parent.winfo_exists():
+            parent = self.root
         try:
             result = update_checker.check_for_update()
         except update_checker.UpdateCheckError as exc:
             messagebox.showwarning(
                 "Update Check",
                 str(exc),
-                parent=self.root,
+                parent=parent,
             )
             return
 
@@ -642,7 +700,7 @@ class MainWindow:
             messagebox.showinfo(
                 "No Updates Available",
                 f"You are using the latest version ({APP_VERSION}).",
-                parent=self.root,
+                parent=parent,
             )
             return
 
@@ -653,7 +711,7 @@ class MainWindow:
             "Update Available",
             f"Version {version} is available.\n\n"
             "Open the official release page in your browser?",
-            parent=self.root,
+            parent=parent,
         )
 
         if open_release:
@@ -664,7 +722,7 @@ class MainWindow:
                     "Could Not Open Browser",
                     f"Open this release page manually:\n"
                     f"{release_url}\n\n{exc}",
-                    parent=self.root,
+                    parent=parent,
                 )
 
     # ------------------------------------------------------------------
@@ -677,20 +735,54 @@ class MainWindow:
         # The Merge & Compress workspace keeps its original layout.
         self.root.geometry("960x820")
         self.root.minsize(860, 800)
-        self.root.configure(bg=COLOR_BG)
+        self.root.configure(bg=self._color(COLOR_BG))
 
     def _configure_styles(self) -> None:
         style = ttk.Style(self.root)
-        # Keep the existing style configuration below this point.
-
-        # 'clam' is the most style-able built-in ttk theme and looks
-        # consistent across Windows versions.
         style.theme_use("clam")
+        color = self._color
+        surface = color(COLOR_CARD)
+        text = color(COLOR_TEXT_PRIMARY)
+        muted = color(COLOR_TEXT_MUTED)
+        border = color(COLOR_BORDER)
+        accent = color(COLOR_ACCENT)
+        control = color(COLOR_SECONDARY_BTN_BG)
+        selection = color("#eef2ff")
+        primary_text = "#10192a" if self._theme == "dark" else "#ffffff"
+
+        style.configure(
+            ".", background=surface, foreground=text, bordercolor=border,
+            lightcolor=border, darkcolor=border, selectbackground=selection,
+            selectforeground=text,
+        )
+        for name in ("TEntry", "TCombobox"):
+            style.configure(
+                name, background=control, fieldbackground=surface, foreground=text,
+                insertcolor=text, arrowcolor=text,
+            )
+            style.map(
+                name, fieldbackground=[("disabled", control), ("readonly", surface)],
+                foreground=[("disabled", muted), ("readonly", text)],
+                bordercolor=[("focus", accent)],
+            )
+        for name in ("Vertical.TScrollbar", "Horizontal.TScrollbar"):
+            style.configure(name, background=control, troughcolor=color(COLOR_BG), arrowcolor=text)
+            style.map(name, background=[("active", color("#e2e5ea"))])
+        style.map(
+            "TButton",
+            background=[("disabled", surface), ("active", color("#e2e5ea"))],
+            foreground=[("disabled", muted)],
+        )
+        for option, value in (
+            ("background", surface), ("foreground", text),
+            ("selectBackground", selection), ("selectForeground", text),
+        ):
+            self.root.option_add(f"*TCombobox*Listbox.{option}", value)
 
         style.configure(
             "Primary.TButton",
-            background=COLOR_ACCENT,
-            foreground="#ffffff",
+            background=accent,
+            foreground=primary_text,
             font=("Segoe UI", 11, "bold"),
             padding=(18, 10),
             borderwidth=0,
@@ -698,16 +790,16 @@ class MainWindow:
         style.map(
             "Primary.TButton",
             background=[
-                ("disabled", COLOR_ACCENT_DISABLED),
-                ("active", COLOR_ACCENT_HOVER),
+                ("disabled", color(COLOR_ACCENT_DISABLED)),
+                ("active", color(COLOR_ACCENT_HOVER)),
             ],
-            foreground=[("disabled", "#f0f4fe")],
+            foreground=[("disabled", text if self._theme == "dark" else "#f0f4fe")],
         )
 
         style.configure(
             "Secondary.TButton",
-            background=COLOR_SECONDARY_BTN_BG,
-            foreground=COLOR_SECONDARY_BTN_FG,
+            background=control,
+            foreground=text,
             font=("Segoe UI", 10),
             padding=(14, 8),
             borderwidth=0,
@@ -715,10 +807,10 @@ class MainWindow:
         style.map(
             "Secondary.TButton",
             background=[
-                ("disabled", "#f5f6f8"),
-                ("active", "#e2e5ea"),
+                ("disabled", color(COLOR_BG)),
+                ("active", color("#e2e5ea")),
             ],
-            foreground=[("disabled", COLOR_TEXT_MUTED)],
+            foreground=[("disabled", muted)],
         )
 
         # Outlined variant for the two non-primary action buttons (MERGE
@@ -728,28 +820,28 @@ class MainWindow:
         # Add More/Clear All/per-row Remove/Move).
         style.configure(
             "ActionSecondary.TButton",
-            background="#ffffff",
-            foreground=COLOR_ACCENT,
+            background=surface,
+            foreground=accent,
             font=("Segoe UI", 11, "bold"),
             padding=(14, 10),
             borderwidth=1,
             relief="solid",
-            bordercolor=COLOR_ACCENT,
+            bordercolor=accent,
         )
         style.map(
             "ActionSecondary.TButton",
             background=[
-                ("disabled", "#f5f6f8"),
-                ("active", "#eef2ff"),
+                ("disabled", color(COLOR_BG)),
+                ("active", selection),
             ],
-            foreground=[("disabled", COLOR_TEXT_MUTED)],
-            bordercolor=[("disabled", COLOR_BORDER)],
+            foreground=[("disabled", muted)],
+            bordercolor=[("disabled", border)],
         )
 
         style.configure(
             "Compression.TRadiobutton",
-            background=COLOR_CARD,
-            foreground=COLOR_TEXT_PRIMARY,
+            background=surface,
+            foreground=text,
             font=("Segoe UI", 10),
         )
 
@@ -759,23 +851,29 @@ class MainWindow:
         # rather than inventing a visually distinct control family.
         style.configure(
             "Card.TCheckbutton",
-            background=COLOR_CARD,
-            foreground=COLOR_TEXT_PRIMARY,
+            background=surface,
+            foreground=text,
             font=("Segoe UI", 10),
         )
 
         style.configure(
             "Card.TFrame",
-            background=COLOR_CARD,
+            background=surface,
         )
 
         style.configure(
             "App.Horizontal.TProgressbar",
-            troughcolor="#e5e7eb",
-            background=COLOR_ACCENT,
+            troughcolor=color("#e5e7eb"),
+            background=accent,
             thickness=8,
             borderwidth=0,
         )
+        for name in ("Compression.TRadiobutton", "Card.TCheckbutton"):
+            style.map(
+                name, background=[("active", surface)],
+                foreground=[("disabled", muted)],
+                indicatorcolor=[("selected", accent), ("!selected", surface)],
+            )
 
     # ------------------------------------------------------------------
     # Layout
@@ -805,13 +903,13 @@ class MainWindow:
         # gained scrolling. The sidebar built by _build_tool_navigation()
         # is a sibling of the scrollable area, not inside it, so it
         # never scrolls away.
-        shell = tk.Frame(self.root, bg=COLOR_BG)
+        shell = tk.Frame(self.root, bg=self._color(COLOR_BG))
         shell.pack(fill="both", expand=True)
 
         self._build_tool_navigation(shell)
         self._build_scrollable_workspace(shell)
 
-        self.merge_compress_view = tk.Frame(self.workspace_container, bg=COLOR_BG)
+        self.merge_compress_view = tk.Frame(self.workspace_container, bg=self._color(COLOR_BG))
 
         outer = self.merge_compress_view
         self._build_header(outer)
@@ -847,11 +945,11 @@ class MainWindow:
         before this fix. Only its parent changed, from being packed
         directly into `shell` to being embedded in a Canvas.
         """
-        workspace_outer = tk.Frame(parent, bg=COLOR_BG)
+        workspace_outer = tk.Frame(parent, bg=self._color(COLOR_BG))
         workspace_outer.pack(side="left", fill="both", expand=True)
 
         self.workspace_canvas = tk.Canvas(
-            workspace_outer, bg=COLOR_BG, highlightthickness=0, bd=0,
+            workspace_outer, bg=self._color(COLOR_BG), highlightthickness=0, bd=0,
         )
         self.workspace_scrollbar = ttk.Scrollbar(
             workspace_outer, orient="vertical",
@@ -864,7 +962,7 @@ class MainWindow:
         # unconditionally, so it doesn't appear when content already
         # fits (e.g. the empty-state screen, or just a couple of files).
 
-        self.workspace_container = tk.Frame(self.workspace_canvas, bg=COLOR_BG)
+        self.workspace_container = tk.Frame(self.workspace_canvas, bg=self._color(COLOR_BG))
         self._workspace_window_id = self.workspace_canvas.create_window(
             (0, 0), window=self.workspace_container, anchor="nw",
         )
@@ -951,17 +1049,22 @@ class MainWindow:
         means scattering tool names through ui.py -- this is the only
         place that reads the registry to build the tool list.
         """
-        nav = tk.Frame(parent, bg=COLOR_CARD, width=200)
+        nav = tk.Frame(parent, bg=self._color(COLOR_CARD), width=200)
         nav.pack(side="left", fill="y")
         nav.pack_propagate(False)  # keep the fixed width regardless of content
         self._nav_frame = nav
+
+        self.settings_btn = ttk.Button(
+            nav, text="\u2699  Settings", style="Secondary.TButton", command=self._open_settings,
+        )
+        self.settings_btn.pack(side="bottom", fill="x", padx=13, pady=14)
 
         title = tk.Label(
             nav,
             text="PDF TOOLS",
             font=("Segoe UI", 10, "bold"),
-            bg=COLOR_CARD,
-            fg=COLOR_TEXT_MUTED,
+            bg=self._color(COLOR_CARD),
+            fg=self._color(COLOR_TEXT_MUTED),
             anchor="w",
         )
         title.pack(fill="x", padx=16, pady=(20, 8))
@@ -971,10 +1074,10 @@ class MainWindow:
 
     def _build_tool_nav_button(self, parent: tk.Widget, tool: "tool_registry.Tool") -> None:
         is_selected = tool.id == self.current_tool_id
-        fg = COLOR_ACCENT if is_selected else (
-            COLOR_TEXT_PRIMARY if tool.is_available else COLOR_TEXT_MUTED
+        fg = self._color(COLOR_ACCENT) if is_selected else (
+            self._color(COLOR_TEXT_PRIMARY) if tool.is_available else self._color(COLOR_TEXT_MUTED)
         )
-        bg = "#eef2ff" if is_selected else COLOR_CARD
+        bg = self._color("#eef2ff") if is_selected else self._color(COLOR_CARD)
 
         row = tk.Frame(parent, bg=bg)
         row.pack(fill="x")
@@ -1000,7 +1103,7 @@ class MainWindow:
                 text="Coming soon",
                 font=("Segoe UI", 8),
                 bg=bg,
-                fg=COLOR_TEXT_MUTED,
+                fg=self._color(COLOR_TEXT_MUTED),
                 anchor="w",
                 padx=16,
             )
@@ -1015,17 +1118,17 @@ class MainWindow:
         implementing the future operations themselves. Its text is
         updated per-tool by _select_tool()/_update_coming_soon_view().
         """
-        self.coming_soon_view = tk.Frame(parent, bg=COLOR_BG)
+        self.coming_soon_view = tk.Frame(parent, bg=self._color(COLOR_BG))
 
-        inner = tk.Frame(self.coming_soon_view, bg=COLOR_BG)
+        inner = tk.Frame(self.coming_soon_view, bg=self._color(COLOR_BG))
         inner.pack(expand=True)
 
         self.coming_soon_title_label = tk.Label(
             inner,
             text="",
             font=("Segoe UI", 18, "bold"),
-            bg=COLOR_BG,
-            fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG),
+            fg=self._color(COLOR_TEXT_PRIMARY),
         )
         self.coming_soon_title_label.pack(pady=(0, 8))
 
@@ -1033,8 +1136,8 @@ class MainWindow:
             inner,
             text="",
             font=("Segoe UI", 11),
-            bg=COLOR_BG,
-            fg=COLOR_TEXT_SECONDARY,
+            bg=self._color(COLOR_BG),
+            fg=self._color(COLOR_TEXT_SECONDARY),
             wraplength=420,
             justify="center",
         )
@@ -1045,7 +1148,7 @@ class MainWindow:
             text="COMING SOON",
             font=("Segoe UI", 9, "bold"),
             bg="#eef0f3",
-            fg=COLOR_TEXT_MUTED,
+            fg=self._color(COLOR_TEXT_MUTED),
             padx=12,
             pady=6,
         )
@@ -1064,28 +1167,28 @@ class MainWindow:
         list. Visual style matches the existing cards/buttons so the
         app still feels like one consistent application.
         """
-        self.split_view = tk.Frame(parent, bg=COLOR_BG)
+        self.split_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.split_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="SPLIT PDF", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
             text="Split one PDF into multiple files -- locally, no upload.",
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Source file card
         source_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         source_card.pack(fill="x", pady=(0, 16))
-        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner = tk.Frame(source_card, bg=self._color(COLOR_CARD))
         source_inner.pack(fill="x", padx=18, pady=16)
 
         self.split_select_btn = ttk.Button(
@@ -1096,22 +1199,22 @@ class MainWindow:
 
         self.split_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.split_source_label.pack(side="left", padx=(16, 0))
 
         # Split mode card
         mode_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         mode_card.pack(fill="x", pady=(0, 16))
-        mode_inner = tk.Frame(mode_card, bg=COLOR_CARD)
+        mode_inner = tk.Frame(mode_card, bg=self._color(COLOR_CARD))
         mode_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             mode_inner, text="Split Mode", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
         self.split_individual_radio = ttk.Radiobutton(
@@ -1122,7 +1225,7 @@ class MainWindow:
         )
         self.split_individual_radio.pack(anchor="w", pady=2)
 
-        every_n_row = tk.Frame(mode_inner, bg=COLOR_CARD)
+        every_n_row = tk.Frame(mode_inner, bg=self._color(COLOR_CARD))
         every_n_row.pack(fill="x", pady=2)
         self.split_every_n_radio = ttk.Radiobutton(
             every_n_row, text="Every", value="every_n",
@@ -1136,10 +1239,10 @@ class MainWindow:
         self.split_n_entry.pack(side="left", padx=(6, 6))
         tk.Label(
             every_n_row, text="pages", font=("Segoe UI", 10),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(side="left")
 
-        custom_row = tk.Frame(mode_inner, bg=COLOR_CARD)
+        custom_row = tk.Frame(mode_inner, bg=self._color(COLOR_CARD))
         custom_row.pack(fill="x", pady=(2, 0))
         self.split_custom_radio = ttk.Radiobutton(
             custom_row, text="Custom ranges:", value="custom",
@@ -1155,11 +1258,11 @@ class MainWindow:
         tk.Label(
             mode_inner,
             text="Example: 1-3, 5, 7-9  (each range becomes its own file)",
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 0))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.split_button = ttk.Button(
             action_wrapper, text="SPLIT PDF", style="Primary.TButton",
@@ -1168,11 +1271,11 @@ class MainWindow:
         self.split_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.split_status_label = tk.Label(
             status_frame, textvariable=self.split_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.split_status_label.pack(fill="x", pady=(0, 6))
@@ -1242,28 +1345,28 @@ class MainWindow:
         this operates on exactly one source file at a time
         (self.remove_pages_source), kept separate from self.state.
         """
-        self.remove_pages_view = tk.Frame(parent, bg=COLOR_BG)
+        self.remove_pages_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.remove_pages_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="REMOVE PAGES", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
             text="Remove selected pages from a PDF -- locally, no upload.",
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Source file card
         source_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         source_card.pack(fill="x", pady=(0, 16))
-        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner = tk.Frame(source_card, bg=self._color(COLOR_CARD))
         source_inner.pack(fill="x", padx=18, pady=16)
 
         self.remove_pages_select_btn = ttk.Button(
@@ -1274,26 +1377,26 @@ class MainWindow:
 
         self.remove_pages_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.remove_pages_source_label.pack(side="left", padx=(16, 0))
 
         # Page-selection card
         selection_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         selection_card.pack(fill="x", pady=(0, 16))
-        selection_inner = tk.Frame(selection_card, bg=COLOR_CARD)
+        selection_inner = tk.Frame(selection_card, bg=self._color(COLOR_CARD))
         selection_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             selection_inner, text="Pages to Remove",
             font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        entry_row = tk.Frame(selection_inner, bg=COLOR_CARD)
+        entry_row = tk.Frame(selection_inner, bg=self._color(COLOR_CARD))
         entry_row.pack(fill="x")
         self.remove_pages_selection_entry = ttk.Entry(
             entry_row, textvariable=self.remove_pages_selection_var, width=30,
@@ -1308,7 +1411,7 @@ class MainWindow:
         tk.Label(
             selection_inner,
             text="Example: 1,3,5-7  (1-based page numbers, inclusive ranges)",
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 10))
 
         # Live preview/summary -- Phase 14 requirement 7: no engine run
@@ -1318,7 +1421,7 @@ class MainWindow:
         self.remove_pages_feedback_var = tk.StringVar(value="")
         self.remove_pages_feedback_label = tk.Label(
             selection_inner, textvariable=self.remove_pages_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.remove_pages_feedback_label.pack(fill="x")
@@ -1326,13 +1429,13 @@ class MainWindow:
         self.remove_pages_error_var = tk.StringVar(value="")
         self.remove_pages_error_label = tk.Label(
             selection_inner, textvariable=self.remove_pages_error_var,
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.remove_pages_error_label.pack(fill="x", pady=(4, 0))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.remove_pages_button = ttk.Button(
             action_wrapper, text="REMOVE PAGES", style="Primary.TButton",
@@ -1341,11 +1444,11 @@ class MainWindow:
         self.remove_pages_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.remove_pages_status_label = tk.Label(
             status_frame, textvariable=self.remove_pages_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.remove_pages_status_label.pack(fill="x", pady=(0, 6))
@@ -1442,28 +1545,28 @@ class MainWindow:
         this operates on exactly one source file at a time
         (self.extract_source), kept separate from self.state.
         """
-        self.extract_view = tk.Frame(parent, bg=COLOR_BG)
+        self.extract_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.extract_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="EXTRACT PAGES", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
             text="Save specific pages of a PDF as a new file -- locally, no upload.",
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Source file card
         source_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         source_card.pack(fill="x", pady=(0, 16))
-        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner = tk.Frame(source_card, bg=self._color(COLOR_CARD))
         source_inner.pack(fill="x", padx=18, pady=16)
 
         self.extract_select_btn = ttk.Button(
@@ -1474,26 +1577,26 @@ class MainWindow:
 
         self.extract_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.extract_source_label.pack(side="left", padx=(16, 0))
 
         # Page-selection card
         selection_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         selection_card.pack(fill="x", pady=(0, 16))
-        selection_inner = tk.Frame(selection_card, bg=COLOR_CARD)
+        selection_inner = tk.Frame(selection_card, bg=self._color(COLOR_CARD))
         selection_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             selection_inner, text="Pages to Extract",
             font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        entry_row = tk.Frame(selection_inner, bg=COLOR_CARD)
+        entry_row = tk.Frame(selection_inner, bg=self._color(COLOR_CARD))
         entry_row.pack(fill="x")
         self.extract_selection_entry = ttk.Entry(
             entry_row, textvariable=self.extract_selection_var, width=30,
@@ -1511,7 +1614,7 @@ class MainWindow:
                 "Example: 2,4  or  1-3,5,7-9  (1-based page numbers; "
                 "pages are extracted in the order you list them)"
             ),
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 10))
 
         # Live preview/summary -- no engine run needed just to validate
@@ -1521,7 +1624,7 @@ class MainWindow:
         self.extract_feedback_var = tk.StringVar(value="")
         self.extract_feedback_label = tk.Label(
             selection_inner, textvariable=self.extract_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.extract_feedback_label.pack(fill="x")
@@ -1529,13 +1632,13 @@ class MainWindow:
         self.extract_error_var = tk.StringVar(value="")
         self.extract_error_label = tk.Label(
             selection_inner, textvariable=self.extract_error_var,
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.extract_error_label.pack(fill="x", pady=(4, 0))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.extract_button = ttk.Button(
             action_wrapper, text="EXTRACT PAGES", style="Primary.TButton",
@@ -1544,11 +1647,11 @@ class MainWindow:
         self.extract_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.extract_status_label = tk.Label(
             status_frame, textvariable=self.extract_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.extract_status_label.pack(fill="x", pady=(0, 6))
@@ -1651,28 +1754,28 @@ class MainWindow:
         surface, always goes back through organize_order_var and
         _update_organize_feedback() (see there).
         """
-        self.organize_view = tk.Frame(parent, bg=COLOR_BG)
+        self.organize_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.organize_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="ORGANIZE PAGES", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
             text="Reorder the pages of a PDF and save as a new file -- locally, no upload.",
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Source file card
         source_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         source_card.pack(fill="x", pady=(0, 16))
-        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner = tk.Frame(source_card, bg=self._color(COLOR_CARD))
         source_inner.pack(fill="x", padx=18, pady=16)
 
         self.organize_select_btn = ttk.Button(
@@ -1683,27 +1786,27 @@ class MainWindow:
 
         self.organize_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.organize_source_label.pack(side="left", padx=(16, 0))
 
         # Order card: text entry (source of truth) + listbox preview +
         # Move Up / Move Down / Reset / Clear
         order_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         order_card.pack(fill="both", expand=True, pady=(0, 16))
-        order_inner = tk.Frame(order_card, bg=COLOR_CARD)
+        order_inner = tk.Frame(order_card, bg=self._color(COLOR_CARD))
         order_inner.pack(fill="both", expand=True, padx=18, pady=14)
 
         tk.Label(
             order_inner, text="Page Order",
             font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        entry_row = tk.Frame(order_inner, bg=COLOR_CARD)
+        entry_row = tk.Frame(order_inner, bg=self._color(COLOR_CARD))
         entry_row.pack(fill="x")
         self.organize_order_entry = ttk.Entry(
             entry_row, textvariable=self.organize_order_var, width=40,
@@ -1727,10 +1830,10 @@ class MainWindow:
                 "for a 5-page document. No ranges -- list each page "
                 "individually. Reset restores 1,2,3,...  (no change)."
             ),
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 10))
 
-        body_row = tk.Frame(order_inner, bg=COLOR_CARD)
+        body_row = tk.Frame(order_inner, bg=self._color(COLOR_CARD))
         body_row.pack(fill="both", expand=True)
 
         # Phase 24.1: a visual thumbnail preview of the current order,
@@ -1744,30 +1847,33 @@ class MainWindow:
         # the existing Move Up/Move Down buttons and any existing
         # tests/keyboard workflow; the two stay in sync (see
         # _rebuild_organize_listbox()).
-        preview_frame = tk.Frame(order_inner, bg=COLOR_CARD)
+        preview_frame = tk.Frame(order_inner, bg=self._color(COLOR_CARD))
         preview_frame.pack(fill="x", pady=(0, 10))
         tk.Label(
             preview_frame, text="Drag pages to reorder:",
-            font=("Segoe UI", 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9, "bold"), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w")
         self.organize_preview_grid = thumbnail_preview.PreviewGrid(
             preview_frame, thumb_size=110, reorderable=True, multiselect=False,
             on_reorder=self._on_organize_grid_reordered,
             on_select=self._on_organize_grid_selected,
-            cache=self._shared_thumbnail_cache, bg=COLOR_CARD,
+            cache=self._shared_thumbnail_cache, bg=self._color(COLOR_CARD), theme=self._theme,
         )
         self.organize_preview_grid.pack(fill="x", pady=(4, 0))
         self.organize_preview_grid.set_thumbnail_loader(self._organize_thumbnail_loader)
 
-        listbox_frame = tk.Frame(body_row, bg=COLOR_CARD)
+        listbox_frame = tk.Frame(body_row, bg=self._color(COLOR_CARD))
         listbox_frame.pack(side="left", fill="both", expand=True)
         tk.Label(
             listbox_frame, text="Resulting order:",
-            font=("Segoe UI", 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9, "bold"), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w")
         listbox_scroll = ttk.Scrollbar(listbox_frame, orient="vertical")
         self.organize_order_listbox = tk.Listbox(
             listbox_frame, height=8, exportselection=False,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
+            selectbackground=self._color("#eef2ff"), selectforeground=self._color(COLOR_TEXT_PRIMARY),
+            highlightbackground=self._color(COLOR_BORDER), highlightcolor=self._color(COLOR_ACCENT),
             yscrollcommand=listbox_scroll.set,
         )
         listbox_scroll.configure(command=self.organize_order_listbox.yview)
@@ -1777,7 +1883,7 @@ class MainWindow:
             "<<ListboxSelect>>", self._on_organize_listbox_select
         )
 
-        move_buttons = tk.Frame(body_row, bg=COLOR_CARD)
+        move_buttons = tk.Frame(body_row, bg=self._color(COLOR_CARD))
         move_buttons.pack(side="left", fill="y", padx=(12, 0))
         self.organize_move_up_btn = ttk.Button(
             move_buttons, text="Move Up", style="Secondary.TButton",
@@ -1793,7 +1899,7 @@ class MainWindow:
         self.organize_feedback_var = tk.StringVar(value="")
         self.organize_feedback_label = tk.Label(
             order_inner, textvariable=self.organize_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.organize_feedback_label.pack(fill="x", pady=(10, 0))
@@ -1801,13 +1907,13 @@ class MainWindow:
         self.organize_error_var = tk.StringVar(value="")
         self.organize_error_label = tk.Label(
             order_inner, textvariable=self.organize_error_var,
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.organize_error_label.pack(fill="x", pady=(4, 0))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.organize_button = ttk.Button(
             action_wrapper, text="ORGANIZE PAGES", style="Primary.TButton",
@@ -1816,11 +1922,11 @@ class MainWindow:
         self.organize_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.organize_status_label = tk.Label(
             status_frame, textvariable=self.organize_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.organize_status_label.pack(fill="x", pady=(0, 6))
@@ -2095,28 +2201,28 @@ class MainWindow:
         Radiobutton pattern (self.split_individual_radio etc.) rather
         than inventing a new control style.
         """
-        self.rotate_view = tk.Frame(parent, bg=COLOR_BG)
+        self.rotate_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.rotate_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="ROTATE PAGES", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
             text="Rotate selected pages of a PDF and save as a new file -- locally, no upload.",
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Source file card
         source_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         source_card.pack(fill="x", pady=(0, 16))
-        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner = tk.Frame(source_card, bg=self._color(COLOR_CARD))
         source_inner.pack(fill="x", padx=18, pady=16)
 
         self.rotate_select_btn = ttk.Button(
@@ -2127,26 +2233,26 @@ class MainWindow:
 
         self.rotate_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.rotate_source_label.pack(side="left", padx=(16, 0))
 
         # Page-selection card
         selection_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         selection_card.pack(fill="x", pady=(0, 16))
-        selection_inner = tk.Frame(selection_card, bg=COLOR_CARD)
+        selection_inner = tk.Frame(selection_card, bg=self._color(COLOR_CARD))
         selection_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             selection_inner, text="Pages to Rotate",
             font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        entry_row = tk.Frame(selection_inner, bg=COLOR_CARD)
+        entry_row = tk.Frame(selection_inner, bg=self._color(COLOR_CARD))
         entry_row.pack(fill="x")
         self.rotate_selection_entry = ttk.Entry(
             entry_row, textvariable=self.rotate_selection_var, width=30,
@@ -2161,7 +2267,7 @@ class MainWindow:
         tk.Label(
             selection_inner,
             text="Example: 1,3,5-7  (1-based, inclusive ranges)",
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 10))
 
         # Live preview/summary -- no engine run needed just to validate
@@ -2171,7 +2277,7 @@ class MainWindow:
         self.rotate_feedback_var = tk.StringVar(value="")
         self.rotate_feedback_label = tk.Label(
             selection_inner, textvariable=self.rotate_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.rotate_feedback_label.pack(fill="x")
@@ -2179,26 +2285,26 @@ class MainWindow:
         self.rotate_error_var = tk.StringVar(value="")
         self.rotate_error_label = tk.Label(
             selection_inner, textvariable=self.rotate_error_var,
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.rotate_error_label.pack(fill="x", pady=(4, 0))
 
         # Rotation card: Direction + Angle
         rotation_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         rotation_card.pack(fill="x", pady=(0, 16))
-        rotation_inner = tk.Frame(rotation_card, bg=COLOR_CARD)
+        rotation_inner = tk.Frame(rotation_card, bg=self._color(COLOR_CARD))
         rotation_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             rotation_inner, text="Rotation", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        direction_row = tk.Frame(rotation_inner, bg=COLOR_CARD)
+        direction_row = tk.Frame(rotation_inner, bg=self._color(COLOR_CARD))
         direction_row.pack(fill="x", pady=(0, 6))
         self.rotate_clockwise_radio = ttk.Radiobutton(
             direction_row, text="Clockwise", value=rotate_engine.CLOCKWISE,
@@ -2216,7 +2322,7 @@ class MainWindow:
         )
         self.rotate_counterclockwise_radio.pack(side="left", padx=(16, 0))
 
-        angle_row = tk.Frame(rotation_inner, bg=COLOR_CARD)
+        angle_row = tk.Frame(rotation_inner, bg=self._color(COLOR_CARD))
         angle_row.pack(fill="x")
         self.rotate_angle_radios = {}
         for angle in rotate_engine.VALID_ANGLES:
@@ -2230,7 +2336,7 @@ class MainWindow:
             self.rotate_angle_radios[angle] = radio
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.rotate_button = ttk.Button(
             action_wrapper, text="ROTATE PAGES", style="Primary.TButton",
@@ -2239,11 +2345,11 @@ class MainWindow:
         self.rotate_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.rotate_status_label = tk.Label(
             status_frame, textvariable=self.rotate_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.rotate_status_label.pack(fill="x", pady=(0, 6))
@@ -2366,28 +2472,28 @@ class MainWindow:
         own docstring for exactly how long password data is kept in
         memory.
         """
-        self.protect_view = tk.Frame(parent, bg=COLOR_BG)
+        self.protect_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.protect_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="PROTECT PDF", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
             text="Add a password to a PDF and save as a new file -- locally, no upload.",
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Source file card
         source_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         source_card.pack(fill="x", pady=(0, 16))
-        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner = tk.Frame(source_card, bg=self._color(COLOR_CARD))
         source_inner.pack(fill="x", padx=18, pady=16)
 
         self.protect_select_btn = ttk.Button(
@@ -2398,30 +2504,30 @@ class MainWindow:
 
         self.protect_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.protect_source_label.pack(side="left", padx=(16, 0))
 
         # Password card
         password_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         password_card.pack(fill="x", pady=(0, 16))
-        password_inner = tk.Frame(password_card, bg=COLOR_CARD)
+        password_inner = tk.Frame(password_card, bg=self._color(COLOR_CARD))
         password_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             password_inner, text="Set Password",
             font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        password_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        password_row = tk.Frame(password_inner, bg=self._color(COLOR_CARD))
         password_row.pack(fill="x", pady=(0, 6))
         tk.Label(
             password_row, text="Password:", width=14, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         self.protect_password_entry = ttk.Entry(
             password_row, textvariable=self.protect_password_var,
@@ -2429,11 +2535,11 @@ class MainWindow:
         )
         self.protect_password_entry.pack(side="left")
 
-        confirm_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        confirm_row = tk.Frame(password_inner, bg=self._color(COLOR_CARD))
         confirm_row.pack(fill="x", pady=(0, 6))
         tk.Label(
             confirm_row, text="Confirm password:", width=14, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         self.protect_confirm_entry = ttk.Entry(
             confirm_row, textvariable=self.protect_confirm_var,
@@ -2441,7 +2547,7 @@ class MainWindow:
         )
         self.protect_confirm_entry.pack(side="left")
 
-        show_password_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        show_password_row = tk.Frame(password_inner, bg=self._color(COLOR_CARD))
         show_password_row.pack(fill="x", pady=(2, 10))
         self.protect_show_password_check = ttk.Checkbutton(
             show_password_row, text="Show password",
@@ -2463,9 +2569,9 @@ class MainWindow:
         # protect_engine.DEFAULT_PERMISSIONS.
         tk.Label(
             password_inner, text="Allow, once opened with the password:",
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(0, 4))
-        permissions_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        permissions_row = tk.Frame(password_inner, bg=self._color(COLOR_CARD))
         permissions_row.pack(fill="x", pady=(0, 10))
         self.protect_allow_printing_check = ttk.Checkbutton(
             permissions_row, text="Printing",
@@ -2495,7 +2601,7 @@ class MainWindow:
         self.protect_feedback_var = tk.StringVar(value="")
         self.protect_feedback_label = tk.Label(
             password_inner, textvariable=self.protect_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.protect_feedback_label.pack(fill="x")
@@ -2503,13 +2609,13 @@ class MainWindow:
         self.protect_error_var = tk.StringVar(value="")
         self.protect_error_label = tk.Label(
             password_inner, textvariable=self.protect_error_var,
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.protect_error_label.pack(fill="x", pady=(4, 0))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.protect_button = ttk.Button(
             action_wrapper, text="PROTECT PDF", style="Primary.TButton",
@@ -2518,11 +2624,11 @@ class MainWindow:
         self.protect_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.protect_status_label = tk.Label(
             status_frame, textvariable=self.protect_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.protect_status_label.pack(fill="x", pady=(0, 6))
@@ -2643,28 +2749,28 @@ class MainWindow:
         message rather than silently proceeding if the selected file
         turns out not to be password-protected at all.
         """
-        self.unlock_view = tk.Frame(parent, bg=COLOR_BG)
+        self.unlock_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.unlock_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="UNLOCK PDF", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
             text="Create an unlocked copy of a password-protected PDF -- locally, no upload.",
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Source file card
         source_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         source_card.pack(fill="x", pady=(0, 16))
-        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner = tk.Frame(source_card, bg=self._color(COLOR_CARD))
         source_inner.pack(fill="x", padx=18, pady=16)
 
         self.unlock_select_btn = ttk.Button(
@@ -2675,30 +2781,30 @@ class MainWindow:
 
         self.unlock_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.unlock_source_label.pack(side="left", padx=(16, 0))
 
         # Password card
         password_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         password_card.pack(fill="x", pady=(0, 16))
-        password_inner = tk.Frame(password_card, bg=COLOR_CARD)
+        password_inner = tk.Frame(password_card, bg=self._color(COLOR_CARD))
         password_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             password_inner, text="Password",
             font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        password_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        password_row = tk.Frame(password_inner, bg=self._color(COLOR_CARD))
         password_row.pack(fill="x", pady=(0, 6))
         tk.Label(
             password_row, text="Password:", width=14, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         self.unlock_password_entry = ttk.Entry(
             password_row, textvariable=self.unlock_password_var,
@@ -2706,7 +2812,7 @@ class MainWindow:
         )
         self.unlock_password_entry.pack(side="left")
 
-        show_password_row = tk.Frame(password_inner, bg=COLOR_CARD)
+        show_password_row = tk.Frame(password_inner, bg=self._color(COLOR_CARD))
         show_password_row.pack(fill="x", pady=(2, 10))
         self.unlock_show_password_check = ttk.Checkbutton(
             show_password_row, text="Show password",
@@ -2730,7 +2836,7 @@ class MainWindow:
         self.unlock_feedback_var = tk.StringVar(value="")
         self.unlock_feedback_label = tk.Label(
             password_inner, textvariable=self.unlock_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.unlock_feedback_label.pack(fill="x")
@@ -2738,13 +2844,13 @@ class MainWindow:
         self.unlock_error_var = tk.StringVar(value="")
         self.unlock_error_label = tk.Label(
             password_inner, textvariable=self.unlock_error_var,
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.unlock_error_label.pack(fill="x", pady=(4, 0))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.unlock_button = ttk.Button(
             action_wrapper, text="UNLOCK PDF", style="Primary.TButton",
@@ -2753,11 +2859,11 @@ class MainWindow:
         self.unlock_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.unlock_status_label = tk.Label(
             status_frame, textvariable=self.unlock_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.unlock_status_label.pack(fill="x", pady=(0, 6))
@@ -2867,28 +2973,28 @@ class MainWindow:
         and file_manager.generate_numbered_output_path()'s own
         docstring for why.
         """
-        self.page_numbers_view = tk.Frame(parent, bg=COLOR_BG)
+        self.page_numbers_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.page_numbers_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="ADD PAGE NUMBERS", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
             text="Add page numbers to a PDF and save as a new file -- locally, no upload.",
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Source file card
         source_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         source_card.pack(fill="x", pady=(0, 16))
-        source_inner = tk.Frame(source_card, bg=COLOR_CARD)
+        source_inner = tk.Frame(source_card, bg=self._color(COLOR_CARD))
         source_inner.pack(fill="x", padx=18, pady=16)
 
         self.page_numbers_select_btn = ttk.Button(
@@ -2899,22 +3005,22 @@ class MainWindow:
 
         self.page_numbers_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.page_numbers_source_label.pack(side="left", padx=(16, 0))
 
         # Page range card
         range_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         range_card.pack(fill="x", pady=(0, 16))
-        range_inner = tk.Frame(range_card, bg=COLOR_CARD)
+        range_inner = tk.Frame(range_card, bg=self._color(COLOR_CARD))
         range_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             range_inner, text="Pages to Number", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
         self.page_numbers_all_pages_radio = ttk.Radiobutton(
@@ -2925,7 +3031,7 @@ class MainWindow:
         )
         self.page_numbers_all_pages_radio.pack(anchor="w", pady=2)
 
-        selected_row = tk.Frame(range_inner, bg=COLOR_CARD)
+        selected_row = tk.Frame(range_inner, bg=self._color(COLOR_CARD))
         selected_row.pack(fill="x", pady=2)
         self.page_numbers_selected_pages_radio = ttk.Radiobutton(
             selected_row, text="Selected pages:", value=False,
@@ -2942,50 +3048,50 @@ class MainWindow:
         tk.Label(
             range_inner,
             text="Example: 1-3,5,8-10  (1-based, inclusive ranges)",
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 0))
 
         # Options card
         options_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         options_card.pack(fill="x", pady=(0, 16))
-        options_inner = tk.Frame(options_card, bg=COLOR_CARD)
+        options_inner = tk.Frame(options_card, bg=self._color(COLOR_CARD))
         options_inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             options_inner, text="Options", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        start_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        start_row = tk.Frame(options_inner, bg=self._color(COLOR_CARD))
         start_row.pack(fill="x", pady=(0, 8))
         tk.Label(
             start_row, text="Start number:", width=14, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         self.page_numbers_start_entry = ttk.Entry(
             start_row, textvariable=self.page_numbers_start_var, width=8,
         )
         self.page_numbers_start_entry.pack(side="left")
 
-        font_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        font_row = tk.Frame(options_inner, bg=self._color(COLOR_CARD))
         font_row.pack(fill="x", pady=(0, 8))
         tk.Label(
             font_row, text="Font size:", width=14, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         self.page_numbers_font_size_entry = ttk.Entry(
             font_row, textvariable=self.page_numbers_font_size_var, width=8,
         )
         self.page_numbers_font_size_entry.pack(side="left")
 
-        margin_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        margin_row = tk.Frame(options_inner, bg=self._color(COLOR_CARD))
         margin_row.pack(fill="x", pady=(0, 10))
         tk.Label(
             margin_row, text="Margin:", width=14, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         self.page_numbers_margin_entry = ttk.Entry(
             margin_row, textvariable=self.page_numbers_margin_var, width=8,
@@ -2994,7 +3100,7 @@ class MainWindow:
 
         tk.Label(
             options_inner, text="Position:", font=("Segoe UI", 10),
-            bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(0, 4))
 
         position_labels = {
@@ -3003,9 +3109,9 @@ class MainWindow:
             "bottom_center": "Bottom Center", "bottom_right": "Bottom Right",
         }
         self.page_numbers_position_radios = {}
-        top_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        top_row = tk.Frame(options_inner, bg=self._color(COLOR_CARD))
         top_row.pack(fill="x", pady=2)
-        bottom_row = tk.Frame(options_inner, bg=COLOR_CARD)
+        bottom_row = tk.Frame(options_inner, bg=self._color(COLOR_CARD))
         bottom_row.pack(fill="x", pady=2)
         for position in page_numbers_engine.POSITIONS:
             row = top_row if position.startswith("top_") else bottom_row
@@ -3026,7 +3132,7 @@ class MainWindow:
         self.page_numbers_feedback_var = tk.StringVar(value="")
         self.page_numbers_feedback_label = tk.Label(
             outer, textvariable=self.page_numbers_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.page_numbers_feedback_label.pack(fill="x", pady=(0, 4))
@@ -3034,13 +3140,13 @@ class MainWindow:
         self.page_numbers_error_var = tk.StringVar(value="")
         self.page_numbers_error_label = tk.Label(
             outer, textvariable=self.page_numbers_error_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.page_numbers_error_label.pack(fill="x", pady=(0, 10))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.page_numbers_button = ttk.Button(
             action_wrapper, text="ADD PAGE NUMBERS", style="Primary.TButton",
@@ -3049,11 +3155,11 @@ class MainWindow:
         self.page_numbers_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.page_numbers_status_label = tk.Label(
             status_frame, textvariable=self.page_numbers_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.page_numbers_status_label.pack(fill="x", pady=(0, 6))
@@ -3192,14 +3298,14 @@ class MainWindow:
         _update_watermark_feedback()), so the ADD WATERMARK button is
         only ever enabled for a configuration the worker can act on.
         """
-        self.watermark_view = tk.Frame(parent, bg=COLOR_BG)
+        self.watermark_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.watermark_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="ADD WATERMARK", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
@@ -3207,23 +3313,23 @@ class MainWindow:
                 "Overlay a text watermark on a PDF and save as a new "
                 "file -- locally, no upload."
             ),
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         def make_card(pady_inner: int = 14) -> tk.Frame:
             card = tk.Frame(
-                outer, bg=COLOR_CARD,
-                highlightbackground=COLOR_BORDER, highlightthickness=1,
+                outer, bg=self._color(COLOR_CARD),
+                highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
             )
             card.pack(fill="x", pady=(0, 16))
-            inner = tk.Frame(card, bg=COLOR_CARD)
+            inner = tk.Frame(card, bg=self._color(COLOR_CARD))
             inner.pack(fill="x", padx=18, pady=pady_inner)
             return inner
 
         def make_row_label(row: tk.Frame, text: str) -> None:
             tk.Label(
                 row, text=text, width=14, anchor="w",
-                font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+                font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
             ).pack(side="left")
 
         # Source file card
@@ -3235,7 +3341,7 @@ class MainWindow:
         self.watermark_select_btn.pack(side="left")
         self.watermark_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.watermark_source_label.pack(side="left", padx=(16, 0))
 
@@ -3243,7 +3349,7 @@ class MainWindow:
         text_inner = make_card()
         tk.Label(
             text_inner, text="Watermark Text", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
         self.watermark_text_entry = ttk.Entry(
             text_inner, textvariable=self.watermark_text_var, width=48,
@@ -3252,14 +3358,14 @@ class MainWindow:
         tk.Label(
             text_inner,
             text="Example: CONFIDENTIAL, DRAFT, DO NOT COPY  (one line)",
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 0))
 
         # Page range card
         range_inner = make_card()
         tk.Label(
             range_inner, text="Pages to Watermark",
-            font=("Segoe UI", 11, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            font=("Segoe UI", 11, "bold"), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
         self.watermark_all_pages_radio = ttk.Radiobutton(
@@ -3270,7 +3376,7 @@ class MainWindow:
         )
         self.watermark_all_pages_radio.pack(anchor="w", pady=2)
 
-        selected_row = tk.Frame(range_inner, bg=COLOR_CARD)
+        selected_row = tk.Frame(range_inner, bg=self._color(COLOR_CARD))
         selected_row.pack(fill="x", pady=2)
         self.watermark_selected_pages_radio = ttk.Radiobutton(
             selected_row, text="Selected pages:", value=False,
@@ -3287,17 +3393,17 @@ class MainWindow:
         tk.Label(
             range_inner,
             text="Example: 1-3,5,8-10  (1-based, inclusive ranges)",
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 0))
 
         # Appearance card
         appearance_inner = make_card()
         tk.Label(
             appearance_inner, text="Appearance", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        font_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        font_row = tk.Frame(appearance_inner, bg=self._color(COLOR_CARD))
         font_row.pack(fill="x", pady=(0, 8))
         make_row_label(font_row, "Font size:")
         self.watermark_font_size_entry = ttk.Entry(
@@ -3306,10 +3412,10 @@ class MainWindow:
         self.watermark_font_size_entry.pack(side="left")
         tk.Label(
             font_row, text="pt", font=("Segoe UI", 10),
-            bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left", padx=(6, 0))
 
-        opacity_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        opacity_row = tk.Frame(appearance_inner, bg=self._color(COLOR_CARD))
         opacity_row.pack(fill="x", pady=(0, 8))
         make_row_label(opacity_row, "Opacity:")
         self.watermark_opacity_entry = ttk.Entry(
@@ -3318,10 +3424,10 @@ class MainWindow:
         self.watermark_opacity_entry.pack(side="left")
         tk.Label(
             opacity_row, text="%  (0 = invisible, 100 = solid)",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left", padx=(6, 0))
 
-        rotation_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        rotation_row = tk.Frame(appearance_inner, bg=self._color(COLOR_CARD))
         rotation_row.pack(fill="x", pady=(0, 8))
         make_row_label(rotation_row, "Rotation:")
         self.watermark_rotation_combo = ttk.Combobox(
@@ -3332,12 +3438,12 @@ class MainWindow:
         self.watermark_rotation_combo.pack(side="left")
         tk.Label(
             rotation_row, text="degrees, counter-clockwise",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left", padx=(6, 0))
 
         tk.Label(
             appearance_inner, text="Color:", font=("Segoe UI", 10),
-            bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 4))
 
         color_labels = {
@@ -3345,7 +3451,7 @@ class MainWindow:
             "blue": "Blue", "green": "Green",
         }
         self.watermark_color_radios = {}
-        color_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        color_row = tk.Frame(appearance_inner, bg=self._color(COLOR_CARD))
         color_row.pack(fill="x", pady=2)
         for color_name in watermark_engine.COLOR_PRESETS:
             radio = ttk.Radiobutton(
@@ -3356,7 +3462,7 @@ class MainWindow:
             radio.pack(side="left", padx=(0, 16))
             self.watermark_color_radios[color_name] = radio
 
-        custom_row = tk.Frame(appearance_inner, bg=COLOR_CARD)
+        custom_row = tk.Frame(appearance_inner, bg=self._color(COLOR_CARD))
         custom_row.pack(fill="x", pady=(4, 0))
         custom_radio = ttk.Radiobutton(
             custom_row, text="Custom", value="custom",
@@ -3366,8 +3472,8 @@ class MainWindow:
         custom_radio.pack(side="left", padx=(0, 8))
         self.watermark_color_radios["custom"] = custom_radio
         self.watermark_color_swatch = tk.Label(
-            custom_row, text="", width=4, bg=COLOR_BORDER,
-            highlightbackground=COLOR_TEXT_MUTED, highlightthickness=1,
+            custom_row, text="", width=4, bg=self._color(COLOR_BORDER),
+            highlightbackground=self._color(COLOR_TEXT_MUTED), highlightthickness=1,
         )
         self.watermark_color_swatch.pack(side="left", padx=(0, 8))
         self.watermark_color_choose_btn = ttk.Button(
@@ -3380,7 +3486,7 @@ class MainWindow:
         position_inner = make_card()
         tk.Label(
             position_inner, text="Position", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
         position_labels = {
@@ -3391,7 +3497,7 @@ class MainWindow:
             "bottom_right": "Bottom Right",
         }
         self.watermark_position_radios = {}
-        grid = tk.Frame(position_inner, bg=COLOR_CARD)
+        grid = tk.Frame(position_inner, bg=self._color(COLOR_CARD))
         grid.pack(anchor="w")
         for index, position in enumerate(watermark_engine.POSITIONS):
             radio = ttk.Radiobutton(
@@ -3411,7 +3517,7 @@ class MainWindow:
         self.watermark_feedback_var = tk.StringVar(value="")
         self.watermark_feedback_label = tk.Label(
             outer, textvariable=self.watermark_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.watermark_feedback_label.pack(fill="x", pady=(0, 4))
@@ -3419,13 +3525,13 @@ class MainWindow:
         self.watermark_error_var = tk.StringVar(value="")
         self.watermark_error_label = tk.Label(
             outer, textvariable=self.watermark_error_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.watermark_error_label.pack(fill="x", pady=(0, 10))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.watermark_button = ttk.Button(
             action_wrapper, text="ADD WATERMARK", style="Primary.TButton",
@@ -3434,11 +3540,11 @@ class MainWindow:
         self.watermark_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.watermark_status_label = tk.Label(
             status_frame, textvariable=self.watermark_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.watermark_status_label.pack(fill="x", pady=(0, 6))
@@ -3643,14 +3749,14 @@ class MainWindow:
         question is asked, exactly once, at the moment CREATE PDF is
         clicked, the same way Merge Only/Compress Only ask it.
         """
-        self.images_to_pdf_view = tk.Frame(parent, bg=COLOR_BG)
+        self.images_to_pdf_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.images_to_pdf_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="IMAGES \u2192 PDF", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
@@ -3658,16 +3764,16 @@ class MainWindow:
                 "Combine one or more images into a single new PDF, in "
                 "the order shown below -- locally, no upload."
             ),
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         # Select
         select_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         select_card.pack(fill="x", pady=(0, 16))
-        select_inner = tk.Frame(select_card, bg=COLOR_CARD)
+        select_inner = tk.Frame(select_card, bg=self._color(COLOR_CARD))
         select_inner.pack(fill="x", padx=18, pady=16)
 
         self.images_to_pdf_select_btn = ttk.Button(
@@ -3677,7 +3783,7 @@ class MainWindow:
         self.images_to_pdf_select_btn.pack(side="left")
         self.images_to_pdf_count_label = tk.Label(
             select_inner, text="No images selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.images_to_pdf_count_label.pack(side="left", padx=(16, 0))
 
@@ -3693,22 +3799,22 @@ class MainWindow:
         # it was; both stay in sync because _render_images_to_pdf_list()
         # rebuilds them together.
         preview_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         preview_card.pack(fill="x", pady=(0, 16))
-        preview_inner = tk.Frame(preview_card, bg=COLOR_CARD)
+        preview_inner = tk.Frame(preview_card, bg=self._color(COLOR_CARD))
         preview_inner.pack(fill="x", padx=18, pady=14)
         tk.Label(
             preview_inner, text="Drag thumbnails to reorder:",
-            font=("Segoe UI", 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9, "bold"), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w")
         self.images_to_pdf_preview_grid = thumbnail_preview.PreviewGrid(
             preview_inner, thumb_size=110, reorderable=True, multiselect=False,
             on_reorder=self._on_images_to_pdf_grid_reordered,
             on_select=self._on_images_to_pdf_grid_selected,
             on_delete=self._on_images_to_pdf_grid_delete_requested,
-            cache=self._shared_thumbnail_cache, bg=COLOR_CARD,
+            cache=self._shared_thumbnail_cache, bg=self._color(COLOR_CARD), theme=self._theme,
         )
         self.images_to_pdf_preview_grid.pack(fill="x", pady=(4, 0))
         self.images_to_pdf_preview_grid.set_thumbnail_loader(
@@ -3717,45 +3823,45 @@ class MainWindow:
 
         # Ordered list
         list_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         list_card.pack(fill="both", pady=(0, 16))
 
-        header_row = tk.Frame(list_card, bg=COLOR_CARD)
+        header_row = tk.Frame(list_card, bg=self._color(COLOR_CARD))
         header_row.pack(fill="x", padx=16, pady=(14, 6))
         tk.Label(
             header_row, text="#", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, width=3, anchor="w",
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED), width=3, anchor="w",
         ).pack(side="left")
         tk.Label(
             header_row, text="FILENAME", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, anchor="w",
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED), anchor="w",
         ).pack(side="left", fill="x", expand=True)
         tk.Label(
             header_row, text="DIMENSIONS", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, width=12, anchor="w",
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED), width=12, anchor="w",
         ).pack(side="left")
         tk.Label(
             header_row, text="SIZE", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, width=10, anchor="w",
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED), width=10, anchor="w",
         ).pack(side="left")
         tk.Label(
             header_row, text="", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, width=16,
+            bg=self._color(COLOR_CARD), width=16,
         ).pack(side="left")
 
-        tk.Frame(list_card, bg=COLOR_BORDER, height=1).pack(fill="x", padx=16)
+        tk.Frame(list_card, bg=self._color(COLOR_BORDER), height=1).pack(fill="x", padx=16)
 
         # Rows are rendered into this container by
         # _render_images_to_pdf_list(). Shows the empty-state message
         # when self.images_to_pdf_files is empty, one row per
         # models.ImageFile otherwise -- exactly _render_file_list()'s
         # own shape.
-        self.images_to_pdf_list_container = tk.Frame(list_card, bg=COLOR_CARD)
+        self.images_to_pdf_list_container = tk.Frame(list_card, bg=self._color(COLOR_CARD))
         self.images_to_pdf_list_container.pack(fill="both", padx=16, pady=8)
 
-        clear_row = tk.Frame(outer, bg=COLOR_BG)
+        clear_row = tk.Frame(outer, bg=self._color(COLOR_BG))
         clear_row.pack(fill="x", pady=(0, 16))
         self.images_to_pdf_clear_btn = ttk.Button(
             clear_row, text="Clear All", style="Secondary.TButton",
@@ -3765,23 +3871,23 @@ class MainWindow:
 
         # Page size + margin
         options_inner = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         options_inner.pack(fill="x", pady=(0, 16))
-        options_body = tk.Frame(options_inner, bg=COLOR_CARD)
+        options_body = tk.Frame(options_inner, bg=self._color(COLOR_CARD))
         options_body.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             options_body, text="Page Size", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
         page_size_labels = {
             "a4": "A4", "letter": "Letter", "original": "Original Image Ratio",
         }
         self.images_to_pdf_page_size_radios = {}
-        size_row = tk.Frame(options_body, bg=COLOR_CARD)
+        size_row = tk.Frame(options_body, bg=self._color(COLOR_CARD))
         size_row.pack(anchor="w", pady=(0, 12))
         for page_size in images_to_pdf_engine.PAGE_SIZE_CHOICES:
             radio = ttk.Radiobutton(
@@ -3792,11 +3898,11 @@ class MainWindow:
             radio.pack(side="left", padx=(0, 20))
             self.images_to_pdf_page_size_radios[page_size] = radio
 
-        margin_row = tk.Frame(options_body, bg=COLOR_CARD)
+        margin_row = tk.Frame(options_body, bg=self._color(COLOR_CARD))
         margin_row.pack(fill="x")
         tk.Label(
             margin_row, text="Margin:", width=14, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         self.images_to_pdf_margin_entry = ttk.Entry(
             margin_row, textvariable=self.images_to_pdf_margin_var, width=8,
@@ -3804,14 +3910,14 @@ class MainWindow:
         self.images_to_pdf_margin_entry.pack(side="left")
         tk.Label(
             margin_row, text="points  (1 inch = 72 points)",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left", padx=(6, 0))
 
         # Live summary + validation message.
         self.images_to_pdf_feedback_var = tk.StringVar(value="")
         self.images_to_pdf_feedback_label = tk.Label(
             outer, textvariable=self.images_to_pdf_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.images_to_pdf_feedback_label.pack(fill="x", pady=(0, 4))
@@ -3819,13 +3925,13 @@ class MainWindow:
         self.images_to_pdf_error_var = tk.StringVar(value="")
         self.images_to_pdf_error_label = tk.Label(
             outer, textvariable=self.images_to_pdf_error_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.images_to_pdf_error_label.pack(fill="x", pady=(0, 10))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.images_to_pdf_button = ttk.Button(
             action_wrapper, text="CREATE PDF", style="Primary.TButton",
@@ -3834,11 +3940,11 @@ class MainWindow:
         self.images_to_pdf_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.images_to_pdf_status_label = tk.Label(
             status_frame, textvariable=self.images_to_pdf_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.images_to_pdf_status_label.pack(fill="x", pady=(0, 6))
@@ -3954,7 +4060,7 @@ class MainWindow:
             tk.Label(
                 self.images_to_pdf_list_container,
                 text="No images added yet.\nUse Select Images above.",
-                font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+                font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
                 justify="center",
             ).pack(expand=True, pady=40)
             return
@@ -4017,24 +4123,24 @@ class MainWindow:
         is_last = index == len(self.images_to_pdf_files)
         busy = self._any_operation_in_progress()
 
-        row = tk.Frame(parent, bg=COLOR_CARD)
+        row = tk.Frame(parent, bg=self._color(COLOR_CARD))
         row.pack(fill="x", pady=3)
 
         tk.Label(
             row, text=str(index), width=3, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         tk.Label(
             row, text=image_file.name, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(side="left", fill="x", expand=True)
         tk.Label(
             row, text=image_file.dimensions_display, width=12, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
         tk.Label(
             row, text=image_file.size_display, width=10, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
 
         up_btn = ttk.Button(
@@ -4155,14 +4261,14 @@ class MainWindow:
         dialog on every click of Convert to Images. See
         _on_pdf_to_images_choose_folder_clicked()'s own docstring.
         """
-        self.pdf_to_images_view = tk.Frame(parent, bg=COLOR_BG)
+        self.pdf_to_images_view = tk.Frame(parent, bg=self._color(COLOR_BG))
         outer = self.pdf_to_images_view
 
-        header = tk.Frame(outer, bg=COLOR_BG)
+        header = tk.Frame(outer, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
         tk.Label(
             header, text="PDF \u2192 IMAGES", font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w")
         tk.Label(
             header,
@@ -4170,23 +4276,23 @@ class MainWindow:
                 "Render pages of a PDF as PNG or JPEG image files -- "
                 "locally, no upload."
             ),
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w", pady=(2, 0))
 
         def make_card(pady_inner: int = 14) -> tk.Frame:
             card = tk.Frame(
-                outer, bg=COLOR_CARD,
-                highlightbackground=COLOR_BORDER, highlightthickness=1,
+                outer, bg=self._color(COLOR_CARD),
+                highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
             )
             card.pack(fill="x", pady=(0, 16))
-            inner = tk.Frame(card, bg=COLOR_CARD)
+            inner = tk.Frame(card, bg=self._color(COLOR_CARD))
             inner.pack(fill="x", padx=18, pady=pady_inner)
             return inner
 
         def make_row_label(row: tk.Frame, text: str) -> None:
             tk.Label(
                 row, text=text, width=14, anchor="w",
-                font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+                font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
             ).pack(side="left")
 
         # Source file card
@@ -4198,7 +4304,7 @@ class MainWindow:
         self.pdf_to_images_select_btn.pack(side="left")
         self.pdf_to_images_source_label = tk.Label(
             source_inner, text="No file selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.pdf_to_images_source_label.pack(side="left", padx=(16, 0))
 
@@ -4206,7 +4312,7 @@ class MainWindow:
         range_inner = make_card()
         tk.Label(
             range_inner, text="Pages to Convert",
-            font=("Segoe UI", 11, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            font=("Segoe UI", 11, "bold"), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
         self.pdf_to_images_all_pages_radio = ttk.Radiobutton(
@@ -4217,7 +4323,7 @@ class MainWindow:
         )
         self.pdf_to_images_all_pages_radio.pack(anchor="w", pady=2)
 
-        selected_row = tk.Frame(range_inner, bg=COLOR_CARD)
+        selected_row = tk.Frame(range_inner, bg=self._color(COLOR_CARD))
         selected_row.pack(fill="x", pady=2)
         self.pdf_to_images_selected_pages_radio = ttk.Radiobutton(
             selected_row, text="Selected pages:", value=False,
@@ -4234,7 +4340,7 @@ class MainWindow:
         tk.Label(
             range_inner,
             text="Example: 1-3,5,8-10  (1-based, inclusive ranges)",
-            font=("Segoe UI", 9), bg=COLOR_CARD, fg=COLOR_TEXT_MUTED,
+            font=("Segoe UI", 9), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED),
         ).pack(anchor="w", pady=(6, 0))
 
         # Phase 24.1: a read-only-ordered page preview for visual
@@ -4250,20 +4356,20 @@ class MainWindow:
         # a click), never maintains a separate selection of its own. See
         # _on_pdf_to_images_thumbnail_clicked().
         preview_card = tk.Frame(
-            outer, bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER, highlightthickness=1,
+            outer, bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER), highlightthickness=1,
         )
         preview_card.pack(fill="x", pady=(0, 16))
-        preview_inner = tk.Frame(preview_card, bg=COLOR_CARD)
+        preview_inner = tk.Frame(preview_card, bg=self._color(COLOR_CARD))
         preview_inner.pack(fill="x", padx=18, pady=14)
         tk.Label(
             preview_inner, text="Click a page to include/exclude it:",
-            font=("Segoe UI", 9, "bold"), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9, "bold"), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(anchor="w")
         self.pdf_to_images_preview_grid = thumbnail_preview.PreviewGrid(
             preview_inner, thumb_size=100, reorderable=False, multiselect=True,
             on_select=self._on_pdf_to_images_thumbnail_clicked,
-            cache=self._shared_thumbnail_cache, bg=COLOR_CARD,
+            cache=self._shared_thumbnail_cache, bg=self._color(COLOR_CARD), theme=self._theme,
         )
         self.pdf_to_images_preview_grid.pack(fill="x", pady=(4, 0))
         self.pdf_to_images_preview_grid.set_thumbnail_loader(
@@ -4274,10 +4380,10 @@ class MainWindow:
         format_inner = make_card()
         tk.Label(
             format_inner, text="Image Settings", font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        format_row = tk.Frame(format_inner, bg=COLOR_CARD)
+        format_row = tk.Frame(format_inner, bg=self._color(COLOR_CARD))
         format_row.pack(fill="x", pady=(0, 8))
         make_row_label(format_row, "Format:")
         format_labels = {"png": "PNG", "jpeg": "JPEG"}
@@ -4292,7 +4398,7 @@ class MainWindow:
             radio.pack(side="left", padx=(0, 16))
             self.pdf_to_images_format_radios[fmt] = radio
 
-        dpi_row = tk.Frame(format_inner, bg=COLOR_CARD)
+        dpi_row = tk.Frame(format_inner, bg=self._color(COLOR_CARD))
         dpi_row.pack(fill="x", pady=(0, 8))
         make_row_label(dpi_row, "DPI:")
         self.pdf_to_images_dpi_combo = ttk.Combobox(
@@ -4303,10 +4409,10 @@ class MainWindow:
         self.pdf_to_images_dpi_combo.pack(side="left")
         tk.Label(
             dpi_row, text=f"(1\u2013{pdf_to_images_engine.MAX_DPI:g})",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left", padx=(6, 0))
 
-        self.pdf_to_images_quality_row = tk.Frame(format_inner, bg=COLOR_CARD)
+        self.pdf_to_images_quality_row = tk.Frame(format_inner, bg=self._color(COLOR_CARD))
         self.pdf_to_images_quality_row.pack(fill="x")
         make_row_label(self.pdf_to_images_quality_row, "JPEG Quality:")
         self.pdf_to_images_quality_combo = ttk.Combobox(
@@ -4318,7 +4424,7 @@ class MainWindow:
         self.pdf_to_images_quality_combo.pack(side="left")
         tk.Label(
             self.pdf_to_images_quality_row, text="(1\u2013100)",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left", padx=(6, 0))
 
         # Output folder card
@@ -4331,7 +4437,7 @@ class MainWindow:
         self.pdf_to_images_folder_btn.pack(side="left")
         self.pdf_to_images_folder_label = tk.Label(
             folder_inner, text="No output folder selected.",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         )
         self.pdf_to_images_folder_label.pack(side="left", padx=(16, 0))
 
@@ -4339,7 +4445,7 @@ class MainWindow:
         self.pdf_to_images_feedback_var = tk.StringVar(value="")
         self.pdf_to_images_feedback_label = tk.Label(
             outer, textvariable=self.pdf_to_images_feedback_var,
-            font=("Segoe UI", 10), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             justify="left", anchor="w",
         )
         self.pdf_to_images_feedback_label.pack(fill="x", pady=(0, 4))
@@ -4347,13 +4453,13 @@ class MainWindow:
         self.pdf_to_images_error_var = tk.StringVar(value="")
         self.pdf_to_images_error_label = tk.Label(
             outer, textvariable=self.pdf_to_images_error_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg="#c0392b",
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color("#c0392b"),
             justify="left", anchor="w", wraplength=520,
         )
         self.pdf_to_images_error_label.pack(fill="x", pady=(0, 10))
 
         # Action
-        action_wrapper = tk.Frame(outer, bg=COLOR_BG)
+        action_wrapper = tk.Frame(outer, bg=self._color(COLOR_BG))
         action_wrapper.pack(fill="x", pady=(0, 16))
         self.pdf_to_images_button = ttk.Button(
             action_wrapper, text="CONVERT TO IMAGES", style="Primary.TButton",
@@ -4362,11 +4468,11 @@ class MainWindow:
         self.pdf_to_images_button.pack(fill="x", ipady=4)
 
         # Status
-        status_frame = tk.Frame(outer, bg=COLOR_BG)
+        status_frame = tk.Frame(outer, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
         self.pdf_to_images_status_label = tk.Label(
             status_frame, textvariable=self.pdf_to_images_status_var,
-            font=("Segoe UI", 9), bg=COLOR_BG, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 9), bg=self._color(COLOR_BG), fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.pdf_to_images_status_label.pack(fill="x", pady=(0, 6))
@@ -4706,15 +4812,15 @@ class MainWindow:
             self._build_tool_nav_button(self._nav_frame, tool)
 
     def _build_header(self, parent: tk.Widget) -> None:
-        header = tk.Frame(parent, bg=COLOR_BG)
+        header = tk.Frame(parent, bg=self._color(COLOR_BG))
         header.pack(fill="x", pady=(0, 18))
 
         title = tk.Label(
             header,
             text=APP_NAME.upper(),
             font=("Segoe UI", 19, "bold"),
-            bg=COLOR_BG,
-            fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_BG),
+            fg=self._color(COLOR_TEXT_PRIMARY),
         )
         title.pack(anchor="w")
 
@@ -4722,8 +4828,8 @@ class MainWindow:
             header,
             text="Merge and compress PDF files locally -- no upload, no account.",
             font=("Segoe UI", 10),
-            bg=COLOR_BG,
-            fg=COLOR_TEXT_SECONDARY,
+            bg=self._color(COLOR_BG),
+            fg=self._color(COLOR_TEXT_SECONDARY),
         )
         subtitle.pack(anchor="w", pady=(2, 0))
 
@@ -4734,33 +4840,33 @@ class MainWindow:
         # is functional in this phase.
         wrapper = tk.Frame(
             parent,
-            bg=COLOR_CARD,
-            highlightbackground=COLOR_DROPZONE_BORDER,
+            bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_DROPZONE_BORDER),
             highlightthickness=2,
             bd=0,
         )
         wrapper.pack(fill="x", pady=(0, 16))
 
-        inner = tk.Frame(wrapper, bg=COLOR_CARD)
+        inner = tk.Frame(wrapper, bg=self._color(COLOR_CARD))
         inner.pack(fill="both", expand=True, padx=20, pady=28)
 
         drop_label = tk.Label(
             inner,
-            text="Drop PDF files here",
+            text="Choose your source PDFs",
             font=("Segoe UI", 12),
-            bg=COLOR_CARD,
-            fg=COLOR_TEXT_SECONDARY,
+            bg=self._color(COLOR_CARD),
+            fg=self._color(COLOR_TEXT_SECONDARY),
         )
         drop_label.pack()
 
-        or_label = tk.Label(
+        reorder_hint = tk.Label(
             inner,
-            text="OR",
+            text="Drag file rows to reorder",
             font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD,
-            fg=COLOR_TEXT_MUTED,
+            bg=self._color(COLOR_CARD),
+            fg=self._color(COLOR_TEXT_MUTED),
         )
-        or_label.pack(pady=(10, 10))
+        reorder_hint.pack(pady=(10, 10))
 
         self.select_files_btn = ttk.Button(
             inner,
@@ -4773,8 +4879,8 @@ class MainWindow:
     def _build_file_list(self, parent: tk.Widget) -> None:
         card = tk.Frame(
             parent,
-            bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER,
+            bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER),
             highlightthickness=1,
             bd=0,
         )
@@ -4782,51 +4888,57 @@ class MainWindow:
 
         # Column header row. Real per-file rows (added below it in
         # _render_file_list) follow this same column layout.
-        header_row = tk.Frame(card, bg=COLOR_CARD)
+        header_row = tk.Frame(card, bg=self._color(COLOR_CARD))
         header_row.pack(fill="x", padx=16, pady=(14, 6))
 
         tk.Label(
             header_row, text="#", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, width=3, anchor="w",
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED), width=3, anchor="w",
         ).pack(side="left")
         tk.Label(
             header_row, text="FILENAME", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, anchor="w",
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED), anchor="w",
         ).pack(side="left", fill="x", expand=True)
         tk.Label(
             header_row, text="SIZE", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, width=10, anchor="w",
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED), width=10, anchor="w",
         ).pack(side="left")
         tk.Label(
             header_row, text="PAGES", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, fg=COLOR_TEXT_MUTED, width=8, anchor="w",
+            bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_MUTED), width=8, anchor="w",
         ).pack(side="left")
         tk.Label(
             header_row, text="", font=("Segoe UI", 9, "bold"),
-            bg=COLOR_CARD, width=16,
+            bg=self._color(COLOR_CARD), width=16,
         ).pack(side="left")
 
-        separator = tk.Frame(card, bg=COLOR_BORDER, height=1)
+        separator = tk.Frame(card, bg=self._color(COLOR_BORDER), height=1)
         separator.pack(fill="x", padx=16)
 
         # Rows are rendered into this container by _render_file_list().
         # It shows the empty-state message when self.state.files is empty,
         # and one row per PDFFile otherwise.
-        self.file_list_container = tk.Frame(card, bg=COLOR_CARD)
+        self.file_list_container = tk.Frame(card, bg=self._color(COLOR_CARD))
         self.file_list_container.pack(fill="both", expand=True, padx=16, pady=8)
+        self._file_drag = FileRowDrag(
+            self.file_list_container,
+            can_reorder=lambda: not self._any_operation_in_progress(),
+            commit=self._reorder_files,
+            colors=lambda: (self._color("#eef2ff"), self._color(COLOR_ACCENT)),
+        )
 
         self.empty_state_label = tk.Label(
             self.file_list_container,
-            text="No PDF files added yet.\nUse Select PDF Files or drop files above.",
+            text="No PDF files added yet.\nUse Select PDF Files to add documents.",
             font=("Segoe UI", 10),
-            bg=COLOR_CARD,
-            fg=COLOR_TEXT_MUTED,
+            bg=self._color(COLOR_CARD),
+            fg=self._color(COLOR_TEXT_MUTED),
             justify="center",
         )
         self.empty_state_label.pack(expand=True, pady=40)
 
     def _build_summary_bar(self, parent: tk.Widget) -> None:
-        summary = tk.Frame(parent, bg=COLOR_BG)
+        summary = tk.Frame(parent, bg=self._color(COLOR_BG))
         summary.pack(fill="x", pady=(0, 12))
 
         for var in (self.files_count_var, self.pages_count_var, self.size_var):
@@ -4834,12 +4946,12 @@ class MainWindow:
                 summary,
                 textvariable=var,
                 font=("Segoe UI", 10, "bold"),
-                bg=COLOR_BG,
-                fg=COLOR_TEXT_PRIMARY,
+                bg=self._color(COLOR_BG),
+                fg=self._color(COLOR_TEXT_PRIMARY),
             ).pack(side="left", padx=(0, 24))
 
     def _build_list_actions(self, parent: tk.Widget) -> None:
-        actions = tk.Frame(parent, bg=COLOR_BG)
+        actions = tk.Frame(parent, bg=self._color(COLOR_BG))
         actions.pack(fill="x", pady=(0, 20))
 
         # Both start disabled (empty list) and are enabled by
@@ -4867,25 +4979,25 @@ class MainWindow:
     def _build_compression_controls(self, parent: tk.Widget) -> None:
         card = tk.Frame(
             parent,
-            bg=COLOR_CARD,
-            highlightbackground=COLOR_BORDER,
+            bg=self._color(COLOR_CARD),
+            highlightbackground=self._color(COLOR_BORDER),
             highlightthickness=1,
             bd=0,
         )
         card.pack(fill="x", pady=(0, 20))
 
-        inner = tk.Frame(card, bg=COLOR_CARD)
+        inner = tk.Frame(card, bg=self._color(COLOR_CARD))
         inner.pack(fill="x", padx=18, pady=14)
 
         tk.Label(
             inner,
             text="Compression Level",
             font=("Segoe UI", 11, "bold"),
-            bg=COLOR_CARD,
-            fg=COLOR_TEXT_PRIMARY,
+            bg=self._color(COLOR_CARD),
+            fg=self._color(COLOR_TEXT_PRIMARY),
         ).pack(anchor="w", pady=(0, 8))
 
-        options_row = tk.Frame(inner, bg=COLOR_CARD)
+        options_row = tk.Frame(inner, bg=self._color(COLOR_CARD))
         options_row.pack(fill="x")
 
         levels = [
@@ -4903,7 +5015,7 @@ class MainWindow:
             ).pack(side="left", padx=(0, 24))
 
     def _build_action_buttons(self, parent: tk.Widget) -> None:
-        wrapper = tk.Frame(parent, bg=COLOR_BG)
+        wrapper = tk.Frame(parent, bg=self._color(COLOR_BG))
         wrapper.pack(fill="x", pady=(0, 16))
 
         # Three independent buttons -- merging and compression are
@@ -4946,15 +5058,15 @@ class MainWindow:
         self.merge_compress_btn.pack(side="left", fill="x", expand=True, ipady=4)
 
     def _build_status_area(self, parent: tk.Widget) -> None:
-        status_frame = tk.Frame(parent, bg=COLOR_BG)
+        status_frame = tk.Frame(parent, bg=self._color(COLOR_BG))
         status_frame.pack(fill="x")
 
         self.status_label = tk.Label(
             status_frame,
             textvariable=self.status_var,
             font=("Segoe UI", 9),
-            bg=COLOR_BG,
-            fg=COLOR_TEXT_SECONDARY,
+            bg=self._color(COLOR_BG),
+            fg=self._color(COLOR_TEXT_SECONDARY),
             anchor="w",
         )
         self.status_label.pack(fill="x", pady=(0, 6))
@@ -5209,16 +5321,17 @@ class MainWindow:
     # ------------------------------------------------------------------
 
     def _render_file_list(self) -> None:
+        self._file_drag.reset()
         for child in self.file_list_container.winfo_children():
             child.destroy()
 
         if not self.state.files:
             self.empty_state_label = tk.Label(
                 self.file_list_container,
-                text="No PDF files added yet.\nUse Select PDF Files or drop files above.",
+                text="No PDF files added yet.\nUse Select PDF Files to add documents.",
                 font=("Segoe UI", 10),
-                bg=COLOR_CARD,
-                fg=COLOR_TEXT_MUTED,
+                bg=self._color(COLOR_CARD),
+                fg=self._color(COLOR_TEXT_MUTED),
                 justify="center",
             )
             self.empty_state_label.pack(expand=True, pady=40)
@@ -5252,27 +5365,30 @@ class MainWindow:
         # for this and is kept in sync by _set_controls_enabled().
         busy = self._any_operation_in_progress()
 
-        row = tk.Frame(parent, bg=COLOR_CARD)
+        row = tk.Frame(parent, bg=self._color(COLOR_CARD))
         row.pack(fill="x", pady=3)
 
-        tk.Label(
+        position = tk.Label(
             row, text=str(index), width=3, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
-        ).pack(side="left")
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
+        )
+        position.pack(side="left")
 
-        tk.Label(
-            row, text=pdf_file.name, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_PRIMARY,
-        ).pack(side="left", fill="x", expand=True)
+        name = tk.Label(
+            row, text=pdf_file.name, anchor="w", cursor="fleur" if not busy and len(self.state.files) > 1 else "",
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_PRIMARY),
+        )
+        name.pack(side="left", fill="x", expand=True)
+        self._file_drag.add(row, row, position, name)
 
         tk.Label(
             row, text=pdf_file.size_display, width=10, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
 
         tk.Label(
             row, text=pdf_file.page_count_display, width=8, anchor="w",
-            font=("Segoe UI", 10), bg=COLOR_CARD, fg=COLOR_TEXT_SECONDARY,
+            font=("Segoe UI", 10), bg=self._color(COLOR_CARD), fg=self._color(COLOR_TEXT_SECONDARY),
         ).pack(side="left")
 
         # Each control below is bound to `pdf_file` by identity via the
@@ -5302,6 +5418,14 @@ class MainWindow:
             state="disabled" if busy else "normal",
         )
         remove_btn.pack(side="left", padx=(6, 0))
+
+    def _reorder_files(self, source: int, destination: int) -> None:
+        if self._any_operation_in_progress():
+            return
+        file = self.state.files.pop(source)
+        self.state.files.insert(destination, file)
+        self._render_file_list()
+        self.status_var.set(f"Status: Moved '{file.name}' to position {destination + 1}.")
 
     def _update_summary(self) -> None:
         self.files_count_var.set(f"Files: {self.state.total_files}")
@@ -9196,5 +9320,5 @@ class MainWindow:
 def run() -> None:
     """Entry point used by app.py to start the GUI event loop."""
     root = tk.Tk()
-    MainWindow(root)
+    MainWindow(root, settings_path=ui_theme.settings_path())
     root.mainloop()
