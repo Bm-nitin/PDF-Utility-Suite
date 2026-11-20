@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import json
 import re
-from email.utils import parsedate_to_datetime
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 from config import APP_VERSION
@@ -69,11 +69,30 @@ def _rate_limit_message(headers) -> str:
     return "GitHub rate limit reached. Please try again later."
 
 
+def _windows_download_url(assets: object, tag: str) -> str | None:
+    if not isinstance(assets, list):
+        return None
+
+    uploaded_urls = {
+        asset["browser_download_url"] for asset in assets
+        if isinstance(asset, dict) and asset.get("state") == "uploaded"
+        and isinstance(asset.get("browser_download_url"), str)
+    }
+    prefix = f"{RELEASES_PAGE}/download/{quote(tag, safe='')}"
+    versioned = f"{prefix}/PDF-Merger-Compressor-{quote(tag.lstrip('vV'), safe='')}.exe"
+    unversioned = f"{prefix}/PDF-Merger-Compressor.exe"
+    if versioned in uploaded_urls:
+        return versioned
+    if unversioned in uploaded_urls:
+        return unversioned
+    return None
+
+
 def check_for_update(current_version: str = APP_VERSION) -> dict:
     """Check the latest published release and return update information.
 
-    Returns a dictionary containing update_available, version, release_url,
-    and notes. Raises UpdateCheckError for network/API/response failures.
+    Returns update_available, version, release_url, notes, and the optional
+    Windows download_url. Raises UpdateCheckError for network/API/response failures.
     """
     request = Request(
         LATEST_RELEASE_API,
@@ -143,5 +162,6 @@ def check_for_update(current_version: str = APP_VERSION) -> dict:
         "update_available": newer,
         "version": tag.lstrip("vV"),
         "release_url": release_url,
+        "download_url": _windows_download_url(payload.get("assets"), tag) if newer else None,
         "notes": notes,
     }

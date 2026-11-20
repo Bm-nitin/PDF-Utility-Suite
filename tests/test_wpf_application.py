@@ -18,6 +18,65 @@ def _make_pdf(path, texts):
         document.save(path)
 
 
+_MAXIMIZE_CHECK = r"""
+$window.ShowActivated = $false
+$window.ShowInTaskbar = $false
+$window.WindowStartupLocation = 'Manual'
+$window.Left = -20000
+$window.Top = -20000
+
+function Toggle-WindowSize {
+    $ToggleWindowSize.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+}
+
+$qaState = @{ Step = 0; Start = [DateTime]::UtcNow }
+$qa = [Windows.Threading.DispatcherTimer]::new()
+$qa.Interval = [TimeSpan]::FromMilliseconds(40)
+$qa.Add_Tick({
+    if (([DateTime]::UtcNow - $qaState.Start).TotalSeconds -gt 10) {
+        throw "Maximize test timed out at step $($qaState.Step) in state $($window.WindowState)."
+    }
+    if (-not $ui.Ready) { return }
+    switch ($qaState.Step) {
+        0 {
+            $ui.Navigation.split.IsChecked = $true
+            Toggle-WindowSize
+            $qaState.Step = 1
+        }
+        1 {
+            if ($window.WindowState -ne 'Maximized') { return }
+            $window.UpdateLayout()
+            $handle = [Windows.Interop.WindowInteropHelper]::new($window).Handle
+            $workArea = [Windows.Forms.Screen]::FromHandle($handle).WorkingArea
+            foreach ($control in @($RunAction, $SettingsButton)) {
+                $bottomRight = $control.PointToScreen(
+                    [Windows.Point]::new($control.ActualWidth, $control.ActualHeight)
+                )
+                if ($bottomRight.Y -gt $workArea.Bottom) {
+                    throw "$($control.Name) bottom ($($bottomRight.Y)) exceeds the work area bottom ($($workArea.Bottom))."
+                }
+            }
+            Toggle-WindowSize
+            $qaState.Step = 2
+        }
+        2 {
+            if ($window.WindowState -ne 'Normal') { return }
+            $qa.Stop()
+            $window.Close()
+        }
+    }
+})
+$qa.Start()
+Start-Interface
+"""
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="The WPF interface requires Windows.")
+def test_maximized_window_keeps_bottom_controls_above_taskbar(tmp_path, monkeypatch):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    wpf_app.run(entry=_MAXIMIZE_CHECK)
+
+
 _UI_CHECK = r"""
 $window.ShowActivated = $false
 $window.ShowInTaskbar = $false
@@ -27,6 +86,8 @@ $window.Top = -20000
 $files = $env:PDF_WPF_TEST_FILES | ConvertFrom-Json
 
 function Choose-SavePath([string]$suggestion) { return $files.output }
+
+function Open-UpdateLink([string]$url) { $qaState.OpenedUrl = $url }
 
 function QA-Import([string]$tool, $paths) {
     $ui.Navigation[$tool].IsChecked = $true
@@ -125,8 +186,25 @@ $qa.Add_Tick({
         }
         6 {
             if ($ui.Updating) { return }
-            if ($UpdateStatus.Text -notlike '*2.0.0*' -or $OpenRelease.Visibility -ne 'Visible') {
-                throw 'The update result was not displayed inline.'
+            if ($UpdateStatus.Text -notlike '*2.0.0*' -or $UpdateAction.Visibility -ne 'Visible' -or
+                $UpdateAction.Content -ne 'Download Update') {
+                throw 'The available update did not show a download button.'
+            }
+            $UpdateAction.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+            if ($qaState.OpenedUrl -ne $files.download) {
+                throw 'Download Update did not open the direct EXE URL.'
+            }
+            $CheckUpdates.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+            $qaState.Step = 7
+        }
+        7 {
+            if ($ui.Updating) { return }
+            if ($UpdateAction.Visibility -ne 'Visible' -or $UpdateAction.Content -ne 'Open release page') {
+                throw 'The update without an EXE did not show the release page button.'
+            }
+            $UpdateAction.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+            if ($qaState.OpenedUrl -ne $files.release) {
+                throw 'The fallback button did not open the release page.'
             }
             $ui.Navigation.merge_compress.IsChecked = $true
             if ($ui.Active.Rows.Count -ne 3 -or $ui.Active.Rows[2].Name -ne 'Résumé.pdf') {
@@ -153,14 +231,17 @@ def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch):
         with Image.new("RGB", (40, 32), path.stem) as image:
             image.save(path)
     output = tmp_path / "merged.pdf"
+    releases = "https://github.com/Bm-nitin/PDF-Utility-Suite/releases"
+    release_page = f"{releases}/tag/v2.0.0"
+    download_url = f"{releases}/download/v2.0.0/PDF-Merger-Compressor-2.0.0.exe"
     monkeypatch.setenv("PDF_WPF_TEST_FILES", json.dumps(
-        {"merge": pdfs, "images": images, "output": output}, default=str,
+        {"merge": pdfs, "images": images, "output": output, "release": release_page, "download": download_url},
+        default=str,
     ))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
-    monkeypatch.setattr(wpf_backend.update_checker, "check_for_update", lambda: {
-        "update_available": True, "version": "2.0.0",
-        "release_url": "https://github.com/Bm-nitin/PDF-Utility-Suite/releases/tag/v2.0.0",
-    })
+    update = {"update_available": True, "version": "2.0.0", "release_url": release_page}
+    responses = iter([{**update, "download_url": download_url}, update])
+    monkeypatch.setattr(wpf_backend.update_checker, "check_for_update", lambda: next(responses))
 
     open_wpf = wpf_app.run
     monkeypatch.setattr(wpf_app, "run", lambda: open_wpf(entry=_UI_CHECK))

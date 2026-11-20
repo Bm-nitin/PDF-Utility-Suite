@@ -39,14 +39,14 @@ $window = [Windows.Markup.XamlReader]::Parse($xaml)
 $names = 'MinimizeWindow ToggleWindowSize CloseWindow SettingsButton Tools Workspace TitleText Description
 AddFiles FileSummary FileList EmptyQueue ListTitle RowHeading MoveUp MoveDown RemoveFile ClearFiles
 ReorderOverlay ReorderSlot FloatingRow FloatingContent OptionsScroll Options StatusText Activity RunAction
-SettingsView LightTheme DarkTheme ThemeStatus VersionLabel CheckUpdates OpenRelease UpdateStatus'
+SettingsView LightTheme DarkTheme ThemeStatus VersionLabel CheckUpdates UpdateAction UpdateStatus'
 foreach ($name in $names -split '\s+') { Set-Variable -Name $name -Value $window.FindName($name) }
 $FloatingContent.ContentTemplate = $FileList.ItemTemplate
 
 $ui = @{
     Active = $null; States = @{}; Controls = @{}; Passwords = @()
     Busy = $false; Binding = $false; Settings = $false; Sequence = 0
-    Pending = @{}; ThumbnailPending = $false; Release = $null
+    Pending = @{}; ThumbnailPending = $false; UpdateLink = $null
     Updating = $false; Theme = ''; Navigation = @{}; Ready = $false
 }
 
@@ -660,9 +660,15 @@ function Receive-Message($message) {
             $ui.Updating = $false
             $CheckUpdates.IsEnabled = $true
             if ($result.update_available) {
-                $ui.Release = $result.release_url
+                if ($result.download_url) {
+                    $ui.UpdateLink = $result.download_url
+                    $UpdateAction.Content = 'Download Update'
+                } else {
+                    $ui.UpdateLink = $result.release_url
+                    $UpdateAction.Content = 'Open release page'
+                }
                 $UpdateStatus.Text = "Version $($result.version) is available."
-                $OpenRelease.Visibility = 'Visible'
+                $UpdateAction.Visibility = 'Visible'
             } else { $UpdateStatus.Text = 'You are using the latest available version.' }
         }
     }
@@ -743,18 +749,23 @@ $SettingsButton.Add_Checked({
 })
 $LightTheme.Add_Checked({ Update-ThemeFromSettings 'light' })
 $DarkTheme.Add_Checked({ Update-ThemeFromSettings 'dark' })
+function Open-UpdateLink([string]$url) {
+    [void][Diagnostics.Process]::Start($url)
+}
+
 $CheckUpdates.Add_Click({
     if ($ui.Updating) { return }
     $ui.Updating = $true
     $CheckUpdates.IsEnabled = $false
-    $OpenRelease.Visibility = 'Collapsed'
+    $ui.UpdateLink = $null
+    $UpdateAction.Visibility = 'Collapsed'
     $UpdateStatus.Text = 'Checking for updates…'
     Send-Request @{ action = 'updates' }
 })
-$OpenRelease.Add_Click({
-    if ($ui.Release) {
-        try { [void][Diagnostics.Process]::Start($ui.Release) }
-        catch { $UpdateStatus.Text = $ui.Release }
+$UpdateAction.Add_Click({
+    if ($ui.UpdateLink) {
+        try { Open-UpdateLink $ui.UpdateLink }
+        catch { $UpdateStatus.Text = "Open this link in your browser: $($ui.UpdateLink)" }
     }
 })
 

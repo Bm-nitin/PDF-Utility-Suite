@@ -36,9 +36,10 @@ XAML = r"""
         xmlns:shell="clr-namespace:System.Windows.Shell;assembly=PresentationFramework"
         Title="PDF Utility Suite" Width="1130" Height="752"
         MinWidth="940" MinHeight="660" WindowStartupLocation="CenterScreen"
-        WindowStyle="None" FontFamily="Segoe UI" FontSize="14" Background="{DynamicResource Canvas}"
+        WindowStyle="SingleBorderWindow" FontFamily="Segoe UI" FontSize="14" Background="{DynamicResource Canvas}"
         TextOptions.TextFormattingMode="Display"
         UseLayoutRounding="True" SnapsToDevicePixels="True">
+    <!-- Keep the native frame style so Windows maximizes to the monitor's work area. -->
     <shell:WindowChrome.WindowChrome>
         <shell:WindowChrome CaptionHeight="31" ResizeBorderThickness="6"
                             GlassFrameThickness="0" CornerRadius="0" UseAeroCaptionButtons="False"/>
@@ -608,7 +609,7 @@ XAML = r"""
                         <TextBlock x:Name="VersionLabel" Foreground="{DynamicResource Muted}" Margin="0,6,0,14"/>
                         <WrapPanel>
                             <Button x:Name="CheckUpdates" Content="Check for Updates" Style="{StaticResource ButtonBase}"/>
-                            <Button x:Name="OpenRelease" Content="Open release page" Style="{StaticResource PrimaryButton}"
+                            <Button x:Name="UpdateAction" Style="{StaticResource PrimaryButton}"
                                     Visibility="Collapsed" Margin="8,0,0,0"/>
                         </WrapPanel>
                         <TextBlock x:Name="UpdateStatus" TextWrapping="Wrap" Margin="0,12,0,0"
