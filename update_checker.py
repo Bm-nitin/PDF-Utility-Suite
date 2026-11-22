@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -22,6 +24,12 @@ LATEST_RELEASE_API = (
 )
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 TIMEOUT_SECONDS = 6
+_PORTABLE_EXE_STEM = "PDF-Merger-Compressor"
+_SETUP_EXE_STEM = "PDF-Utility-Suite-Setup"
+_UNINSTALL_KEY = (
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
+    r"\{06D43D9E-FA9D-4AD6-A999-BB3405A747F1}_is1"
+)
 
 
 class UpdateCheckError(Exception):
@@ -69,7 +77,30 @@ def _rate_limit_message(headers) -> str:
     return "GitHub rate limit reached. Please try again later."
 
 
-def _windows_download_url(assets: object, tag: str) -> str | None:
+def _is_windows_install() -> bool:
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return False
+
+    import winreg
+
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE, _UNINSTALL_KEY, 0,
+            winreg.KEY_READ | winreg.KEY_WOW64_64KEY,
+        ) as key:
+            install_location, _ = winreg.QueryValueEx(key, "InstallLocation")
+        if not isinstance(install_location, str):
+            return False
+        directory = Path(install_location)
+        if not directory.is_absolute():
+            return False
+        installed_exe = directory / f"{_PORTABLE_EXE_STEM}.exe"
+        return installed_exe.resolve() == Path(sys.executable).resolve()
+    except (OSError, RuntimeError):
+        return False
+
+
+def _windows_download_url(assets: object, tag: str, *, installed: bool) -> str | None:
     if not isinstance(assets, list):
         return None
 
@@ -79,20 +110,23 @@ def _windows_download_url(assets: object, tag: str) -> str | None:
         and isinstance(asset.get("browser_download_url"), str)
     }
     prefix = f"{RELEASES_PAGE}/download/{quote(tag, safe='')}"
-    versioned = f"{prefix}/PDF-Merger-Compressor-{quote(tag.lstrip('vV'), safe='')}.exe"
-    unversioned = f"{prefix}/PDF-Merger-Compressor.exe"
-    if versioned in uploaded_urls:
-        return versioned
-    if unversioned in uploaded_urls:
-        return unversioned
+    version = quote(tag.lstrip("vV"), safe="")
+    if installed:
+        filenames = (f"{_SETUP_EXE_STEM}-{version}.exe",)
+    else:
+        filenames = (f"{_PORTABLE_EXE_STEM}-{version}.exe", f"{_PORTABLE_EXE_STEM}.exe")
+    for filename in filenames:
+        url = f"{prefix}/{filename}"
+        if url in uploaded_urls:
+            return url
     return None
 
 
 def check_for_update(current_version: str = APP_VERSION) -> dict:
     """Check the latest published release and return update information.
 
-    Returns update_available, version, release_url, notes, and the optional
-    Windows download_url. Raises UpdateCheckError for network/API/response failures.
+    Returns release metadata and, when available, the matching Windows download
+    URL and whether it is a Setup EXE.
     """
     request = Request(
         LATEST_RELEASE_API,
@@ -158,10 +192,13 @@ def check_for_update(current_version: str = APP_VERSION) -> dict:
     if not isinstance(notes, str):
         notes = ""
 
+    installed = newer and _is_windows_install()
+    download_url = _windows_download_url(payload.get("assets"), tag, installed=installed) if newer else None
     return {
         "update_available": newer,
         "version": tag.lstrip("vV"),
         "release_url": release_url,
-        "download_url": _windows_download_url(payload.get("assets"), tag) if newer else None,
+        "download_url": download_url,
+        "download_is_setup": installed and download_url is not None,
         "notes": notes,
     }

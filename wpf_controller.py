@@ -665,14 +665,19 @@ function Receive-Message($message) {
             $ui.Updating = $false
             $CheckUpdates.IsEnabled = $true
             if ($result.update_available) {
+                $UpdateStatus.Text = "Version $($result.version) is available."
                 if ($result.download_url) {
                     $ui.UpdateLink = $result.download_url
-                    $UpdateAction.Content = 'Download Update'
+                    if ($result.download_is_setup) {
+                        $UpdateAction.Content = 'Download Setup'
+                        $UpdateStatus.Text += ' Close PDF Utility Suite before running Setup.'
+                    } else {
+                        $UpdateAction.Content = 'Download Update'
+                    }
                 } else {
                     $ui.UpdateLink = $result.release_url
                     $UpdateAction.Content = 'Open release page'
                 }
-                $UpdateStatus.Text = "Version $($result.version) is available."
                 $UpdateAction.Visibility = 'Visible'
             } else { $UpdateStatus.Text = 'You are using the latest available version.' }
         }

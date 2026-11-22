@@ -204,6 +204,19 @@ $qa.Add_Tick({
         }
         7 {
             if ($ui.Updating) { return }
+            if ($UpdateAction.Visibility -ne 'Visible' -or $UpdateAction.Content -ne 'Download Setup' -or
+                $UpdateStatus.Text -notlike '*Close PDF Utility Suite before running Setup.*') {
+                throw 'The installed update did not show a Setup download and close instruction.'
+            }
+            $UpdateAction.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+            if ($qaState.OpenedUrl -ne $files.setup) {
+                throw 'Download Setup did not open the direct installer URL.'
+            }
+            $CheckUpdates.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
+            $qaState.Step = 8
+        }
+        8 {
+            if ($ui.Updating) { return }
             if ($UpdateAction.Visibility -ne 'Visible' -or $UpdateAction.Content -ne 'Open release page') {
                 throw 'The update without an EXE did not show the release page button.'
             }
@@ -239,14 +252,19 @@ def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch, isolat
     releases = "https://github.com/Bm-nitin/PDF-Utility-Suite/releases"
     release_page = f"{releases}/tag/v2.0.0"
     download_url = f"{releases}/download/v2.0.0/PDF-Merger-Compressor-2.0.0.exe"
+    setup_url = f"{releases}/download/v2.0.0/PDF-Utility-Suite-Setup-2.0.0.exe"
     log_file = tmp_path / "PDFUtilitySuite" / "Logs" / "app.txt"
     monkeypatch.setenv("PDF_WPF_TEST_FILES", json.dumps(
         {"merge": pdfs, "images": images, "output": output, "release": release_page,
-         "download": download_url, "log": log_file}, default=str,
+         "download": download_url, "setup": setup_url, "log": log_file}, default=str,
     ))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     update = {"update_available": True, "version": "2.0.0", "release_url": release_page}
-    responses = iter([{**update, "download_url": download_url}, update])
+    responses = iter([
+        {**update, "download_url": download_url},
+        {**update, "download_url": setup_url, "download_is_setup": True},
+        update,
+    ])
     monkeypatch.setattr(wpf_backend.update_checker, "check_for_update", lambda: next(responses))
 
     open_wpf = wpf_app.run
