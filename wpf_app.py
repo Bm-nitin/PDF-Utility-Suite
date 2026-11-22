@@ -4,20 +4,20 @@ from __future__ import annotations
 
 import base64
 import json
-import logging
 import os
 from pathlib import Path
 import subprocess
 import sys
 from threading import Thread
 
+from app_logging import get_logger
 import pdf_engine
 import update_checker
 import wpf_backend
 import wpf_controller
 import wpf_view
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 _BOOTSTRAP = r"""
 $ErrorActionPreference = 'Stop'
@@ -49,30 +49,41 @@ def interface_script(entry: str = "Start-Interface") -> str:
 
 
 def _forward_errors(stream) -> None:
-    for line in stream:
-        logger.error("WPF: %s", line.rstrip())
+    for index, line in enumerate(stream):
+        if index == 0:
+            logger.error("The Windows interface reported an error")
+        logger.debug("WPF: %s", line.rstrip())
 
 
 def _serve(process: subprocess.Popen) -> None:
     for line in process.stdout:
         request = json.loads(line)
         request_id = request["id"]
+        tool = request.get("tool")
+        operation = tool if request["action"] == "execute" and tool in wpf_backend.TOOLS else None
 
         def send(kind: str, value) -> None:
             message = json.dumps({"id": request_id, "kind": kind, "value": value}, default=str)
             process.stdin.write(message + "\n")
             process.stdin.flush()
 
+        if operation:
+            logger.info("Started %s", operation)
         try:
             response = wpf_backend.dispatch(request, lambda text: send("progress", text))
         except BrokenPipeError:
             return
         except (pdf_engine.PDFEngineError, update_checker.UpdateCheckError, OSError) as exc:
+            if operation:
+                logger.warning("Failed %s", operation, exc_info=True)
             send("error", str(exc))
         except Exception:
             logger.exception("WPF command failed")
             send("error", "The operation could not be completed.")
         else:
+            if operation:
+                status = " with errors" if response.get("errors") else ""
+                logger.info("Finished %s%s", operation, status)
             send("result", response)
 
 

@@ -6,6 +6,7 @@ import pytest
 from PIL import Image
 
 import app
+import app_logging
 import ui_theme
 import wpf_app
 import wpf_backend
@@ -179,6 +180,10 @@ $qa.Add_Tick({
             $SettingsButton.IsChecked = $true
             if ($Workspace.Visibility -ne 'Collapsed' -or $SettingsView.Visibility -ne 'Visible' -or
                 $window.OwnedWindows.Count) { throw 'Settings did not stay inside the main window.' }
+            if ($LogPath.Text -ne $files.log -or -not $LogPath.IsReadOnly -or -not $OpenLogs.IsEnabled) {
+                throw "Settings did not show the actual log path. Value: $($LogPath.Text)"
+            }
+            $OpenLogs.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
             $DarkTheme.IsChecked = $true
             if ($window.Resources['Canvas'].Color.ToString() -ne '#FF0E1522') { throw 'Dark theme did not apply.' }
             $CheckUpdates.RaiseEvent([Windows.RoutedEventArgs]::new([Windows.Controls.Button]::ClickEvent))
@@ -221,7 +226,7 @@ Start-Interface
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="The WPF interface requires Windows.")
-def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch):
+def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch, isolated_logging):
     names = ["Résumé", "Second", "Third"]
     pdfs = [tmp_path / f"{name}.pdf" for name in names]
     for path, title in zip(pdfs, ["First", "Second", "Third"]):
@@ -234,9 +239,10 @@ def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch):
     releases = "https://github.com/Bm-nitin/PDF-Utility-Suite/releases"
     release_page = f"{releases}/tag/v2.0.0"
     download_url = f"{releases}/download/v2.0.0/PDF-Merger-Compressor-2.0.0.exe"
+    log_file = tmp_path / "PDFUtilitySuite" / "Logs" / "app.txt"
     monkeypatch.setenv("PDF_WPF_TEST_FILES", json.dumps(
-        {"merge": pdfs, "images": images, "output": output, "release": release_page, "download": download_url},
-        default=str,
+        {"merge": pdfs, "images": images, "output": output, "release": release_page,
+         "download": download_url, "log": log_file}, default=str,
     ))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
     update = {"update_available": True, "version": "2.0.0", "release_url": release_page}
@@ -245,7 +251,8 @@ def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch):
 
     open_wpf = wpf_app.run
     monkeypatch.setattr(wpf_app, "run", lambda: open_wpf(entry=_UI_CHECK))
-    monkeypatch.setattr(app, "_setup_logging", lambda: None)
+    opened_folders = []
+    monkeypatch.setattr(wpf_backend.os, "startfile", opened_folders.append)
     monkeypatch.setattr(app, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(app, "OUTPUT_DIR", tmp_path / "output")
     assert app.main() == 0
@@ -253,3 +260,8 @@ def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch):
     with pymupdf.open(output) as document:
         assert [page.get_text().strip() for page in document] == ["Second", "Third", "First"]
     assert ui_theme.load_theme(tmp_path / "PDFUtilitySuite" / "settings.json") == "dark"
+    assert opened_folders == [log_file.parent]
+    assert app_logging.log_path() == log_file
+    log = log_file.read_text(encoding="utf-8")
+    assert "Started merge_compress" in log and "Finished merge_compress" in log
+    assert "Résumé.pdf" not in log and str(output) not in log

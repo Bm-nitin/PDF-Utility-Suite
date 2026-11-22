@@ -8,6 +8,8 @@ from pathlib import Path
 import tempfile
 import tkinter as tk
 
+from config import user_data_dir
+
 THEMES = ("light", "dark")
 
 _DARK_COLORS = {
@@ -74,9 +76,7 @@ def recolor_widgets(
 
 
 def settings_path() -> Path:
-    local_data = os.environ.get("LOCALAPPDATA")
-    directory = Path(local_data) if local_data else Path.home() / ".config"
-    return directory / "PDFUtilitySuite" / "settings.json"
+    return user_data_dir() / "settings.json"
 
 
 def load_theme(path: Path) -> str:

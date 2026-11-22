@@ -66,7 +66,6 @@ pixel data or encoder behavior.
 
 from __future__ import annotations
 
-import logging
 import math
 import os
 import tempfile
@@ -78,9 +77,10 @@ import pymupdf
 import file_manager
 import pdf_engine
 import split_engine
+from app_logging import get_logger
 from pdf_engine import PDFEngineError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PdfToImagesError(PDFEngineError):
@@ -314,7 +314,7 @@ def _atomic_write_bytes(data: bytes, output_path: Path) -> None:
             try:
                 tmp_path.unlink()
             except OSError:
-                logger.warning("Could not remove temp file: %s", tmp_path)
+                logger.warning("Could not remove a temporary image", exc_info=True)
 
 
 def render_pdf_to_images(
@@ -469,7 +469,5 @@ def render_pdf_to_images(
                 if path.exists():
                     path.unlink()
             except OSError:
-                logger.warning(
-                    "Could not remove partial PDF -> Images output: %s", path
-                )
+                logger.warning("Could not remove a partial image export", exc_info=True)
         raise

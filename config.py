@@ -7,6 +7,7 @@ Keep all constants, presets, and tunable values here so they are not
 scattered throughout the codebase.
 """
 
+import os
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
@@ -39,6 +40,12 @@ ASSETS_DIR = BASE_DIR / "assets"
 
 ICON_PATH = ASSETS_DIR / "icon.ico"
 LOGO_PATH = ASSETS_DIR / "logo.png"
+
+
+def user_data_dir() -> Path:
+    local_data = os.environ.get("LOCALAPPDATA")
+    directory = Path(local_data) if local_data else Path.home() / ".config"
+    return directory / "PDFUtilitySuite"
 
 # ---------------------------------------------------------------------------
 # Compression presets
@@ -112,4 +119,4 @@ DEFAULT_COMPRESSION_LEVEL = "recommended"
 # Logging
 # ---------------------------------------------------------------------------
 
-LOG_FILE_NAME = "pdf_merger_compressor.log"
+LOG_FILE_NAME = "app.txt"

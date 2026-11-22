@@ -22,7 +22,6 @@ PDFEngineError instead of letting a raw OSError escape to the caller.
 
 from __future__ import annotations
 
-import logging
 import os
 import tempfile
 from pathlib import Path
@@ -30,9 +29,10 @@ from typing import Callable, List, Optional
 
 import pymupdf
 
+from app_logging import get_logger
 from config import COMPRESSION_PRESETS, DEFAULT_COMPRESSION_LEVEL
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 # ---------------------------------------------------------------------------
@@ -121,7 +121,7 @@ def _atomic_save_pdf(doc: "pymupdf.Document", output_path: Path, **save_kwargs) 
             try:
                 tmp_path.unlink()
             except OSError:
-                logger.warning("Could not remove temp file: %s", tmp_path)
+                logger.warning("Could not remove a temporary PDF", exc_info=True)
 
 
 # ---------------------------------------------------------------------------
@@ -508,6 +508,4 @@ def merge_and_compress(
             try:
                 merged_temp_path.unlink()
             except OSError:
-                logger.warning(
-                    "Could not delete temp file: %s", merged_temp_path
-                )
+                logger.warning("Could not remove the temporary merged PDF", exc_info=True)

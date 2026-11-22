@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from typing import Callable
 
+import app_logging
 from config import APP_NAME, APP_VERSION, COMPRESSION_PRESETS
 import extract_engine
 import file_manager
@@ -132,8 +134,10 @@ def describe() -> dict:
                 "id": tool.id, "name": tool.name, "description": tool.description,
                 "source": source, "destination": destination, "action": action, "fields": fields,
             })
+    log_file = app_logging.log_path()
     return {
         "name": APP_NAME, "version": APP_VERSION,
+        "log_path": str(log_file) if log_file else None,
         "theme": ui_theme.load_theme(ui_theme.settings_path()), "tools": tools,
     }
 
@@ -329,6 +333,15 @@ def dispatch(request: dict, progress: Callable[[str], None]):
         return None
     if action == "updates":
         return update_checker.check_for_update()
+    if action == "open_logs":
+        log_file = app_logging.log_path()
+        if log_file is None:
+            raise OSError("The log folder is unavailable.")
+        try:
+            os.startfile(log_file.parent)
+        except OSError as exc:
+            raise OSError("Could not open the logs folder.") from exc
+        return None
     if action in ("filename", "execute"):
         paths = [Path(path) for path in request["paths"]]
         if action == "filename":

@@ -39,7 +39,8 @@ $window = [Windows.Markup.XamlReader]::Parse($xaml)
 $names = 'MinimizeWindow ToggleWindowSize CloseWindow SettingsButton Tools Workspace TitleText Description
 AddFiles FileSummary FileList EmptyQueue ListTitle RowHeading MoveUp MoveDown RemoveFile ClearFiles
 ReorderOverlay ReorderSlot FloatingRow FloatingContent OptionsScroll Options StatusText Activity RunAction
-SettingsView LightTheme DarkTheme ThemeStatus VersionLabel CheckUpdates UpdateAction UpdateStatus'
+SettingsView LightTheme DarkTheme ThemeStatus VersionLabel CheckUpdates UpdateAction UpdateStatus
+LogPath OpenLogs LogStatus'
 foreach ($name in $names -split '\s+') { Set-Variable -Name $name -Value $window.FindName($name) }
 $FloatingContent.ContentTemplate = $FileList.ItemTemplate
 
@@ -560,6 +561,9 @@ function Initialize-Tools($info) {
     $LightTheme.IsChecked = $info.theme -eq 'light'
     $DarkTheme.IsChecked = $info.theme -eq 'dark'
     $VersionLabel.Text = "Installed version $($info.version)"
+    $LogPath.Text = $info.log_path
+    $OpenLogs.IsEnabled = [bool]$info.log_path
+    if (-not $info.log_path) { $LogStatus.Text = 'The log folder is unavailable.' }
     foreach ($tool in $info.tools) {
         $ui.States[$tool.id] = New-State $tool
         $button = [Windows.Controls.RadioButton]::new()
@@ -592,6 +596,7 @@ function Receive-Message($message) {
             'describe' { throw $result }
             'thumbnail' { $ui.ThumbnailPending = $false }
             'theme' { $ThemeStatus.Text = $result }
+            'open_logs' { $LogStatus.Text = $result }
             'updates' {
                 $ui.Updating = $false
                 $CheckUpdates.IsEnabled = $true
@@ -749,6 +754,11 @@ $SettingsButton.Add_Checked({
 })
 $LightTheme.Add_Checked({ Update-ThemeFromSettings 'light' })
 $DarkTheme.Add_Checked({ Update-ThemeFromSettings 'dark' })
+$OpenLogs.Add_Click({
+    $LogStatus.Text = ''
+    Send-Request @{ action = 'open_logs' }
+})
+
 function Open-UpdateLink([string]$url) {
     [void][Diagnostics.Process]::Start($url)
 }

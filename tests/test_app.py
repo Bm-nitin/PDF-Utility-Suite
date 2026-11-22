@@ -22,6 +22,7 @@ from unittest.mock import patch
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import app
+import app_logging
 import config
 
 
@@ -57,21 +58,7 @@ def test_ensure_directories_is_safe_to_call_when_dirs_already_exist(tmp_path, mo
 def test_main_returns_zero_on_normal_exit(tmp_path, monkeypatch):
     monkeypatch.setattr(app, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(app, "OUTPUT_DIR", tmp_path / "output")
-    monkeypatch.setattr(app, "BASE_DIR", tmp_path)
 
-    # _setup_logging() is mocked out here (and below) because it's
-    # orthogonal to what these tests actually verify -- main()'s control
-    # flow (return codes, exception handling, ordering). Calling the
-    # real _setup_logging() repeatedly across several tests in one
-    # process, each against a different ephemeral tmp_path, creates a
-    # real logging.FileHandler every time; logging.basicConfig() is a
-    # no-op after its first real call in a process, so most of those
-    # handler objects are immediately orphaned, and when Python's GC
-    # later finalizes one against a tmp_path pytest has already deleted,
-    # it raises a benign-but-noisy PytestUnraisableExceptionWarning under
-    # `-W error`. This was found and fixed during Phase 11 exactly
-    # because the -W error stress-run this project relies on (since
-    # Phase 9) caught it -- confirming that check's value.
     with patch.object(app, "_setup_logging"):
         with patch("ui.run", return_value=None):
             result = app.main()
@@ -86,7 +73,6 @@ def test_main_returns_one_and_does_not_raise_on_unhandled_exception(tmp_path, mo
     """
     monkeypatch.setattr(app, "TEMP_DIR", tmp_path / "temp")
     monkeypatch.setattr(app, "OUTPUT_DIR", tmp_path / "output")
-    monkeypatch.setattr(app, "BASE_DIR", tmp_path)
 
     with patch.object(app, "_setup_logging"):
         with patch("ui.run", side_effect=RuntimeError("simulated startup failure")):
@@ -100,7 +86,6 @@ def test_main_creates_directories_before_launching_ui(tmp_path, monkeypatch):
     output_dir = tmp_path / "output"
     monkeypatch.setattr(app, "TEMP_DIR", temp_dir)
     monkeypatch.setattr(app, "OUTPUT_DIR", output_dir)
-    monkeypatch.setattr(app, "BASE_DIR", tmp_path)
 
     seen_dirs_exist_at_launch = {}
 
@@ -115,38 +100,66 @@ def test_main_creates_directories_before_launching_ui(tmp_path, monkeypatch):
     assert seen_dirs_exist_at_launch == {"temp": True, "output": True}
 
 
-def test_setup_logging_actually_configures_a_file_handler(tmp_path, monkeypatch):
-    """Separate, dedicated test for _setup_logging() itself (the thing
-    the other tests above deliberately avoid exercising repeatedly) --
-    called exactly once, matching real usage, so it doesn't hit the
-    orphaned-handler issue described above.
-    """
-    import logging
+def test_frozen_app_writes_persistent_log_beside_exe(tmp_path, monkeypatch, isolated_logging):
+    install = tmp_path / "Custom installation"
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(install / "PDF-Merger-Compressor.exe"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
+    log_file = install / "Logs" / "app.txt"
 
-    monkeypatch.setattr(app, "BASE_DIR", tmp_path)
-    log_path = tmp_path / app.LOG_FILE_NAME
+    app._setup_logging()
+    isolated_logging.info("First launch")
+    for handler in isolated_logging.handlers[:]:
+        isolated_logging.removeHandler(handler)
+        handler.close()
+    app._setup_logging()
+    isolated_logging.info("Second launch")
 
-    root_logger = logging.getLogger()
-    original_handlers = list(root_logger.handlers)
-    original_level = root_logger.level
+    assert app_logging.log_path() == log_file
+    text = log_file.read_text(encoding="utf-8")
+    assert "First launch" in text
+    assert "Second launch" in text
+
+
+def test_logging_falls_back_if_install_folder_is_unwritable(tmp_path, monkeypatch, isolated_logging):
+    install = tmp_path / "Installation"
+    install.mkdir()
+    (install / "Logs").touch()
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(install / "app.exe"))
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+
+    app._setup_logging()
+
+    assert app_logging.log_path() == tmp_path / "PDFUtilitySuite" / "Logs" / config.LOG_FILE_NAME
+    assert app_logging.log_path().is_file()
+
+
+def test_log_keeps_error_type_without_document_details(tmp_path, monkeypatch, isolated_logging):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    app._setup_logging()
+
     try:
-        for h in root_logger.handlers[:]:
-            root_logger.removeHandler(h)
+        raise OSError("Private.pdf with password secret")
+    except OSError:
+        isolated_logging.exception("PDF operation failed")
 
-        app._setup_logging()
-
-        assert log_path.exists() or any(
-            isinstance(h, logging.FileHandler) for h in root_logger.handlers
-        )
-    finally:
-        for h in root_logger.handlers[:]:
-            h.close()
-            root_logger.removeHandler(h)
-        for h in original_handlers:
-            root_logger.addHandler(h)
-        root_logger.setLevel(original_level)
+    text = app_logging.log_path().read_text(encoding="utf-8")
+    assert "PDF operation failed" in text
+    assert "OSError" in text
+    assert "Private.pdf" not in text
+    assert "secret" not in text
 
 
-def test_log_file_name_is_defined_and_reasonable():
-    assert config.LOG_FILE_NAME.endswith(".log")
-    assert "/" not in config.LOG_FILE_NAME and "\\" not in config.LOG_FILE_NAME
+def test_log_rotation_keeps_recent_backups(tmp_path, monkeypatch, isolated_logging):
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path))
+    monkeypatch.setattr(app_logging, "_MAX_LOG_BYTES", 240)
+    app._setup_logging()
+    for index in range(30):
+        isolated_logging.info("Diagnostic event %s", index)
+
+    log_file = app_logging.log_path()
+    assert "Diagnostic event 29" in log_file.read_text(encoding="utf-8")
+    assert {path.name for path in log_file.parent.glob("app.txt*")} == {
+        "app.txt", "app.txt.1", "app.txt.2", "app.txt.3",
+    }

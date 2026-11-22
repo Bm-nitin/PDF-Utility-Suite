@@ -588,35 +588,49 @@ XAML = r"""
                 </Grid>
             </Grid>
 
-            <StackPanel x:Name="SettingsView" Visibility="Collapsed" MaxWidth="700" HorizontalAlignment="Left">
-                <TextBlock Text="Settings" FontSize="28" FontWeight="SemiBold" Margin="0,0,0,18"/>
-                <Border Style="{StaticResource Card}" Margin="0,0,0,14">
-                    <StackPanel>
-                        <TextBlock Text="Appearance" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,12"/>
-                        <StackPanel Orientation="Horizontal">
-                            <RadioButton x:Name="LightTheme" Content="Light" GroupName="Theme"
-                                         Style="{StaticResource PresetButton}" Tag="Light backgrounds" Width="165" Margin="0,0,10,0"/>
-                            <RadioButton x:Name="DarkTheme" Content="Dark" GroupName="Theme"
-                                         Style="{StaticResource PresetButton}" Tag="Dark backgrounds" Width="165" Margin="0"/>
+            <ScrollViewer x:Name="SettingsView" Visibility="Collapsed" VerticalScrollBarVisibility="Auto"
+                          HorizontalScrollBarVisibility="Disabled">
+                <StackPanel MaxWidth="700" HorizontalAlignment="Left">
+                    <TextBlock Text="Settings" FontSize="28" FontWeight="SemiBold" Margin="0,0,0,18"/>
+                    <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                        <StackPanel>
+                            <TextBlock Text="Appearance" FontSize="18" FontWeight="SemiBold" Margin="0,0,0,12"/>
+                            <StackPanel Orientation="Horizontal">
+                                <RadioButton x:Name="LightTheme" Content="Light" GroupName="Theme"
+                                             Style="{StaticResource PresetButton}" Tag="Light backgrounds" Width="165" Margin="0,0,10,0"/>
+                                <RadioButton x:Name="DarkTheme" Content="Dark" GroupName="Theme"
+                                             Style="{StaticResource PresetButton}" Tag="Dark backgrounds" Width="165" Margin="0"/>
+                            </StackPanel>
+                            <TextBlock x:Name="ThemeStatus" Foreground="{DynamicResource Muted}" TextWrapping="Wrap"
+                                       FontSize="12" Margin="0,9,0,0"/>
                         </StackPanel>
-                        <TextBlock x:Name="ThemeStatus" Foreground="{DynamicResource Muted}" TextWrapping="Wrap"
-                                   FontSize="12" Margin="0,9,0,0"/>
-                    </StackPanel>
-                </Border>
-                <Border Style="{StaticResource Card}">
-                    <StackPanel>
-                        <TextBlock Text="Updates" FontSize="18" FontWeight="SemiBold"/>
-                        <TextBlock x:Name="VersionLabel" Foreground="{DynamicResource Muted}" Margin="0,6,0,14"/>
-                        <WrapPanel>
-                            <Button x:Name="CheckUpdates" Content="Check for Updates" Style="{StaticResource ButtonBase}"/>
-                            <Button x:Name="UpdateAction" Style="{StaticResource PrimaryButton}"
-                                    Visibility="Collapsed" Margin="8,0,0,0"/>
-                        </WrapPanel>
-                        <TextBlock x:Name="UpdateStatus" TextWrapping="Wrap" Margin="0,12,0,0"
-                                   Foreground="{DynamicResource Muted}"/>
-                    </StackPanel>
-                </Border>
-            </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource Card}" Margin="0,0,0,14">
+                        <StackPanel>
+                            <TextBlock Text="Updates" FontSize="18" FontWeight="SemiBold"/>
+                            <TextBlock x:Name="VersionLabel" Foreground="{DynamicResource Muted}" Margin="0,6,0,14"/>
+                            <WrapPanel>
+                                <Button x:Name="CheckUpdates" Content="Check for Updates" Style="{StaticResource ButtonBase}"/>
+                                <Button x:Name="UpdateAction" Style="{StaticResource PrimaryButton}"
+                                        Visibility="Collapsed" Margin="8,0,0,0"/>
+                            </WrapPanel>
+                            <TextBlock x:Name="UpdateStatus" TextWrapping="Wrap" Margin="0,12,0,0"
+                                       Foreground="{DynamicResource Muted}"/>
+                        </StackPanel>
+                    </Border>
+                    <Border Style="{StaticResource Card}">
+                        <StackPanel>
+                            <TextBlock Text="Logs" FontSize="18" FontWeight="SemiBold"/>
+                            <TextBox x:Name="LogPath" IsReadOnly="True" TextWrapping="Wrap" Margin="0,8,0,12"
+                                     AutomationProperties.Name="Log file path"/>
+                            <Button x:Name="OpenLogs" Content="Open Logs Folder" Style="{StaticResource ButtonBase}"
+                                    HorizontalAlignment="Left" IsEnabled="False"/>
+                            <TextBlock x:Name="LogStatus" TextWrapping="Wrap" Margin="0,9,0,0"
+                                       Foreground="{DynamicResource Muted}"/>
+                        </StackPanel>
+                    </Border>
+                </StackPanel>
+            </ScrollViewer>
         </Grid>
     </Grid>
 </Window>

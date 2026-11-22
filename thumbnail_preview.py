@@ -42,7 +42,6 @@ every render function only ever opens its input for reading.
 from __future__ import annotations
 
 import io
-import logging
 import queue
 import threading
 import tkinter as tk
@@ -53,10 +52,11 @@ from typing import Any, Callable, Dict, List, Optional
 
 import pymupdf
 
+from app_logging import get_logger
 from drag_reorder import Slide
 import ui_theme
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 #: Default thumbnail width/height bound, in pixels -- within the
 #: Phase 24.1 spec's recommended 120-180px range. Callers may pass a
@@ -519,9 +519,7 @@ class PreviewGrid(tk.Frame):
             try:
                 data = self._loader(item) if self._loader is not None else None
             except Exception:
-                logger.warning(
-                    "Thumbnail rendering failed for %r", item.item_id, exc_info=True,
-                )
+                logger.warning("Thumbnail rendering failed", exc_info=True)
                 data = None
             self._result_queue.put((generation, item.item_id, data))
 

@@ -15,23 +15,10 @@ file_manager.py, models.py, and config.py.
 
 from __future__ import annotations
 
-import logging
 import sys
-from pathlib import Path
 
-from config import BASE_DIR, LOG_FILE_NAME, TEMP_DIR, OUTPUT_DIR
-
-
-def _setup_logging() -> None:
-    log_path = BASE_DIR / LOG_FILE_NAME
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[
-            logging.FileHandler(log_path, encoding="utf-8"),
-            logging.StreamHandler(sys.stdout),
-        ],
-    )
+from app_logging import get_logger, setup_logging as _setup_logging
+from config import APP_VERSION, TEMP_DIR, OUTPUT_DIR
 
 
 def _ensure_directories() -> None:
@@ -41,12 +28,11 @@ def _ensure_directories() -> None:
 
 def main() -> int:
     _setup_logging()
-    logger = logging.getLogger(__name__)
-    _ensure_directories()
-
-    logger.info("Starting PDF Merger & Compressor")
+    logger = get_logger(__name__)
+    logger.info("Starting PDF Utility Suite version %s", APP_VERSION)
 
     try:
+        _ensure_directories()
         import ui
         ui.run()
     except Exception:

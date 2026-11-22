@@ -17,7 +17,21 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+import app_logging
 from ui import MainWindow
+
+
+@pytest.fixture
+def isolated_logging(monkeypatch):
+    logger = app_logging.get_logger(__name__).parent
+    original_level = logger.level
+    monkeypatch.setattr(logger, "handlers", [])
+    try:
+        yield logger
+    finally:
+        for handler in logger.handlers:
+            handler.close()
+        logger.setLevel(original_level)
 
 
 @pytest.fixture(scope="session")

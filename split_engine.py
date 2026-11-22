@@ -15,7 +15,6 @@ for merge_pdfs() and compress_pdf().
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -23,9 +22,10 @@ import pymupdf
 
 import file_manager
 import pdf_engine
+from app_logging import get_logger
 from pdf_engine import PDFEngineError
 
-logger = logging.getLogger(__name__)
+logger = get_logger(__name__)
 
 
 class PageRangeError(PDFEngineError):
@@ -306,7 +306,5 @@ def split_pdf(
                 if path.exists():
                     path.unlink()
             except OSError:
-                logger.warning(
-                    "Could not remove partial split output: %s", path
-                )
+                logger.warning("Could not remove a partial split output", exc_info=True)
         raise
