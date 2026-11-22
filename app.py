@@ -18,7 +18,22 @@ from __future__ import annotations
 import sys
 
 from app_logging import get_logger, setup_logging as _setup_logging
-from config import APP_VERSION, TEMP_DIR, OUTPUT_DIR
+from config import APP_MUTEX_NAME, APP_VERSION, TEMP_DIR, OUTPUT_DIR
+
+
+def _mark_app_running() -> None:
+    if sys.platform != "win32" or not getattr(sys, "frozen", False):
+        return
+
+    import ctypes
+    from ctypes import wintypes
+
+    create_mutex = ctypes.windll.kernel32.CreateMutexW
+    create_mutex.argtypes = (wintypes.LPVOID, wintypes.BOOL, wintypes.LPCWSTR)
+    create_mutex.restype = wintypes.HANDLE
+    # Inno Setup checks these names until Windows closes the handles at process exit.
+    create_mutex(None, False, APP_MUTEX_NAME)
+    create_mutex(None, False, f"Global\\{APP_MUTEX_NAME}")
 
 
 def _ensure_directories() -> None:
@@ -27,6 +42,7 @@ def _ensure_directories() -> None:
 
 
 def main() -> int:
+    _mark_app_running()
     _setup_logging()
     logger = get_logger(__name__)
     logger.info("Starting PDF Utility Suite version %s", APP_VERSION)

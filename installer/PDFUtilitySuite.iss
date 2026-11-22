@@ -18,6 +18,8 @@ DisableDirPage=auto
 UsePreviousAppDir=yes
 DisableProgramGroupPage=yes
 PrivilegesRequired=admin
+AppMutex=PDFUtilitySuite.Running,Global\PDFUtilitySuite.Running
+RedirectionGuard=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
@@ -49,3 +51,5 @@ procedure RegisterPreviousData(PreviousDataKey: Integer);
 begin
   SetPreviousData(PreviousDataKey, 'PrivacyNoticeShown', 'yes');
 end;
+
+#include "uninstall_cleanup.iss"
