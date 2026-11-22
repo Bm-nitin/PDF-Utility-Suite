@@ -13,6 +13,7 @@ AppId={{06D43D9E-FA9D-4AD6-A999-BB3405A747F1}
 AppName={#AppName}
 AppVersion={#AppVersion}
 VersionInfoVersion={#AppVersion}
+VersionInfoProductVersion={#AppVersion}
 DefaultDirName={autopf}\{#AppName}
 DisableDirPage=auto
 UsePreviousAppDir=yes

@@ -21,7 +21,7 @@ $payloadDir = Join-Path $setupBuild 'payload'
 $outputDir = Join-Path $setupBuild 'output'
 $workDir = Join-Path $setupBuild 'pyinstaller'
 $setupScript = Join-Path $PSScriptRoot 'PDFUtilitySuite.iss'
-$spec = Join-Path $project 'PDF-Merger-Compressor.spec'
+$spec = Join-Path $PSScriptRoot 'payload.spec'
 $null = New-Item -ItemType Directory -Path $payloadDir, $outputDir, $workDir -Force
 
 $previousCache = $env:PYINSTALLER_CONFIG_DIR

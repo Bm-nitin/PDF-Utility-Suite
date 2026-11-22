@@ -17,6 +17,7 @@ htmlcov/
 build/
 dist/
 *.spec
+!/installer/payload.spec
 
 # Generated outputs
 temp/*
