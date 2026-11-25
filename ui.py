@@ -1,7 +1,7 @@
 """
 ui.py
 
-All GUI construction and UI state management for PDF Merger & Compressor.
+All GUI construction and UI state management for PDF Utility Suite.
 
 PHASE 4 NOTE: "Select PDF Files" and "Add More" now open the real native
 Windows file picker (via file_manager.py), validate each selected PDF

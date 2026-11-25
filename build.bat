@@ -2,7 +2,7 @@
 setlocal
 
 REM ============================================================================
-REM PDF Merger & Compressor - TEST BUILD
+REM PDF Utility Suite - TEST BUILD
 REM
 REM Usage:
 REM   build.bat
@@ -14,7 +14,7 @@ REM ============================================================================
 
 pushd "%~dp0"
 
-set "APP_NAME=PDF-Merger-Compressor"
+set "APP_NAME=PDF-Utility-Suite"
 set "ENTRY_POINT=app.py"
 set "PYTHON=.venv\Scripts\python.exe"
 set "MODE=onedir"
@@ -24,7 +24,7 @@ if /I "%~1"=="onedir"  set "MODE=onedir"
 
 echo.
 echo ============================================================
-echo   PDF Merger & Compressor - TEST BUILD
+echo   PDF Utility Suite - TEST BUILD
 echo ============================================================
 echo   Mode: %MODE%
 echo   Root: %CD%

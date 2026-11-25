@@ -38,7 +38,7 @@ try {
         throw "Packaging the application failed with exit code $LASTEXITCODE."
     }
 
-    $appExe = Join-Path $payloadDir 'PDF-Merger-Compressor.exe'
+    $appExe = Join-Path $payloadDir 'PDF-Utility-Suite.exe'
     & $compiler.Source "--define=AppVersion=$version" "--define=AppExe=$appExe" "/O$outputDir" $setupScript
     if ($LASTEXITCODE -ne 0) {
         throw "Compiling Setup failed with exit code $LASTEXITCODE."

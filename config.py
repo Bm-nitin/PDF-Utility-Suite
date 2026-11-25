@@ -1,7 +1,7 @@
 ﻿"""
 config.py
 
-Central configuration for PDF Merger & Compressor.
+Central configuration for PDF Utility Suite.
 
 Keep all constants, presets, and tunable values here so they are not
 scattered throughout the codebase.
@@ -14,8 +14,9 @@ from pathlib import Path
 # Application identity
 # ---------------------------------------------------------------------------
 
-APP_NAME = "PDF Merger & Compressor"
-APP_VERSION = "1.0.3"
+APP_NAME = "PDF Utility Suite"
+APP_EXE_STEM = "PDF-Utility-Suite"
+APP_VERSION = "1.0.4"
 APP_MUTEX_NAME = "PDFUtilitySuite.Running"
 
 # ---------------------------------------------------------------------------

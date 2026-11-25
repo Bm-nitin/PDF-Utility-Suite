@@ -36,6 +36,8 @@ class ReleaseAssetTests(unittest.TestCase):
     download_prefix = f"{update_checker.RELEASES_PAGE}/download/v1.2.0"
     versioned = f"{download_prefix}/PDF-Merger-Compressor-1.2.0.exe"
     unversioned = f"{download_prefix}/PDF-Merger-Compressor.exe"
+    renamed_versioned = f"{download_prefix}/PDF-Utility-Suite-1.2.0.exe"
+    renamed_unversioned = f"{download_prefix}/PDF-Utility-Suite.exe"
     setup = f"{download_prefix}/PDF-Utility-Suite-Setup-1.2.0.exe"
 
     def check_release(self, assets, *, installed=False):
@@ -59,6 +61,15 @@ class ReleaseAssetTests(unittest.TestCase):
     def test_unversioned_executable_is_supported(self):
         result = self.check_release([{"state": "uploaded", "browser_download_url": self.unversioned}])
         self.assertEqual(result["download_url"], self.unversioned)
+
+    def test_renamed_portable_executable_is_preferred(self):
+        result = self.check_release([
+            {"state": "uploaded", "browser_download_url": self.versioned},
+            {"state": "uploaded", "browser_download_url": self.renamed_unversioned},
+            {"state": "uploaded", "browser_download_url": self.renamed_versioned},
+        ])
+        self.assertEqual(result["download_url"], self.renamed_versioned)
+        self.assertFalse(result["download_is_setup"])
 
     def test_release_page_remains_available_without_a_matching_executable(self):
         result = self.check_release([
@@ -101,8 +112,13 @@ class WindowsInstallTests(unittest.TestCase):
         import winreg
 
         install_dir = Path(r"C:\Custom PDF Tools")
-        for directory in (install_dir, Path(r"C:\Portable PDF Tools")):
-            executable = directory / "PDF-Merger-Compressor.exe"
+        cases = (
+            (install_dir / "PDF-Utility-Suite.exe", True),
+            (install_dir / "PDF-Merger-Compressor.exe", True),
+            (install_dir / "PDF-Utility-Suite-1.2.0.exe", False),
+            (Path(r"C:\Portable PDF Tools\PDF-Utility-Suite.exe"), False),
+        )
+        for executable, installed in cases:
             with (
                 self.subTest(executable=executable),
                 patch.object(sys, "frozen", True, create=True),
@@ -110,7 +126,7 @@ class WindowsInstallTests(unittest.TestCase):
                 patch.object(winreg, "OpenKey") as open_key,
                 patch.object(winreg, "QueryValueEx", return_value=(str(install_dir), winreg.REG_SZ)),
             ):
-                self.assertEqual(update_checker._is_windows_install(), directory == install_dir)
+                self.assertEqual(update_checker._is_windows_install(), installed)
                 open_key.assert_called_once_with(
                     winreg.HKEY_LOCAL_MACHINE, update_checker._UNINSTALL_KEY, 0,
                     winreg.KEY_READ | winreg.KEY_WOW64_64KEY,

@@ -1,7 +1,7 @@
 ﻿"""
 app.py
 
-Application entry point for PDF Merger & Compressor.
+Application entry point for PDF Utility Suite.
 
 Responsibilities:
   - Set up logging.

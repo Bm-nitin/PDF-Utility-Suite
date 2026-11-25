@@ -16,7 +16,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from config import APP_VERSION
+from config import APP_EXE_STEM, APP_VERSION
 
 GITHUB_REPOSITORY = "Bm-nitin/PDF-Utility-Suite"
 LATEST_RELEASE_API = (
@@ -24,7 +24,7 @@ LATEST_RELEASE_API = (
 )
 RELEASES_PAGE = f"https://github.com/{GITHUB_REPOSITORY}/releases"
 TIMEOUT_SECONDS = 6
-_PORTABLE_EXE_STEM = "PDF-Merger-Compressor"
+_LEGACY_EXE_STEM = "PDF-Merger-Compressor"
 _SETUP_EXE_STEM = "PDF-Utility-Suite-Setup"
 _UNINSTALL_KEY = (
     r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall"
@@ -94,8 +94,11 @@ def _is_windows_install() -> bool:
         directory = Path(install_location)
         if not directory.is_absolute():
             return False
-        installed_exe = directory / f"{_PORTABLE_EXE_STEM}.exe"
-        return installed_exe.resolve() == Path(sys.executable).resolve()
+        executable = Path(sys.executable).resolve()
+        return any(
+            (directory / f"{stem}.exe").resolve() == executable
+            for stem in (APP_EXE_STEM, _LEGACY_EXE_STEM)
+        )
     except (OSError, RuntimeError):
         return False
 
@@ -114,7 +117,10 @@ def _windows_download_url(assets: object, tag: str, *, installed: bool) -> str |
     if installed:
         filenames = (f"{_SETUP_EXE_STEM}-{version}.exe",)
     else:
-        filenames = (f"{_PORTABLE_EXE_STEM}-{version}.exe", f"{_PORTABLE_EXE_STEM}.exe")
+        filenames = (
+            f"{APP_EXE_STEM}-{version}.exe", f"{APP_EXE_STEM}.exe",
+            f"{_LEGACY_EXE_STEM}-{version}.exe", f"{_LEGACY_EXE_STEM}.exe",
+        )
     for filename in filenames:
         url = f"{prefix}/{filename}"
         if url in uploaded_urls:
@@ -132,7 +138,7 @@ def check_for_update(current_version: str = APP_VERSION) -> dict:
         LATEST_RELEASE_API,
         headers={
             "Accept": "application/vnd.github+json",
-            "User-Agent": "PDF-Merger-Compressor-Update-Checker",
+            "User-Agent": "PDF-Utility-Suite-Update-Checker",
             "X-GitHub-Api-Version": "2022-11-28",
         },
     )

@@ -251,7 +251,7 @@ def test_wpf_window_bridge_and_animated_tool_lists(tmp_path, monkeypatch, isolat
     output = tmp_path / "merged.pdf"
     releases = "https://github.com/Bm-nitin/PDF-Utility-Suite/releases"
     release_page = f"{releases}/tag/v2.0.0"
-    download_url = f"{releases}/download/v2.0.0/PDF-Merger-Compressor-2.0.0.exe"
+    download_url = f"{releases}/download/v2.0.0/PDF-Utility-Suite-2.0.0.exe"
     setup_url = f"{releases}/download/v2.0.0/PDF-Utility-Suite-Setup-2.0.0.exe"
     log_file = tmp_path / "PDFUtilitySuite" / "Logs" / "app.txt"
     monkeypatch.setenv("PDF_WPF_TEST_FILES", json.dumps(

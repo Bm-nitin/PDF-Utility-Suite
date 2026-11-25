@@ -6,10 +6,12 @@
 #endif
 
 #define AppName "PDF Utility Suite"
-#define InstalledExe "PDF-Merger-Compressor.exe"
+#define AppGuid "06D43D9E-FA9D-4AD6-A999-BB3405A747F1"
+#define InstalledExe "PDF-Utility-Suite.exe"
+#define LegacyExe "PDF-Merger-Compressor.exe"
 
 [Setup]
-AppId={{06D43D9E-FA9D-4AD6-A999-BB3405A747F1}
+AppId={{{#AppGuid}}
 AppName={#AppName}
 AppVersion={#AppVersion}
 VersionInfoVersion={#AppVersion}
@@ -42,6 +44,49 @@ Source: "{#AppExe}"; DestDir: "{app}"; DestName: "{#InstalledExe}"; Flags: ignor
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#InstalledExe}"; WorkingDir: "{app}"
 
 [Code]
+const
+  InstallRecordKey = 'SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{{#AppGuid}}_is1';
+
+var
+  LegacyExeToRemove: String;
+
+procedure InitializeWizard;
+var
+  RootKey: HKEY;
+  InstallDir, DisplayIcon, LegacyPath: String;
+begin
+  RootKey := HKCU;
+  if IsAdminInstallMode then
+    RootKey := HKLM;
+
+  if RegQueryStringValue(RootKey, InstallRecordKey, 'InstallLocation', InstallDir) and
+    (InstallDir <> '') and
+    RegQueryStringValue(RootKey, InstallRecordKey, 'DisplayIcon', DisplayIcon) then
+  begin
+    LegacyPath := AddBackslash(InstallDir) + '{#LegacyExe}';
+    if CompareText(DisplayIcon, LegacyPath) = 0 then
+      LegacyExeToRemove := LegacyPath;
+  end;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  LegacyPath: String;
+begin
+  if (CurStep <> ssDone) or (LegacyExeToRemove = '') then
+    Exit;
+
+  LegacyPath := ExpandConstant('{app}\{#LegacyExe}');
+  if (CompareText(LegacyPath, LegacyExeToRemove) = 0) and FileExists(LegacyPath) and
+    FileExists(ExpandConstant('{app}\{#InstalledExe}')) then
+  begin
+    if DeleteFile(LegacyPath) then
+      Log('Removed the superseded installed executable: ' + LegacyPath)
+    else
+      Log('Could not remove the superseded installed executable: ' + LegacyPath);
+  end;
+end;
+
 function ShouldSkipPage(PageID: Integer): Boolean;
 begin
   Result := (PageID = wpInfoBefore) and

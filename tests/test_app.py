@@ -103,7 +103,7 @@ def test_main_creates_directories_before_launching_ui(tmp_path, monkeypatch):
 def test_frozen_app_writes_persistent_log_beside_exe(tmp_path, monkeypatch, isolated_logging):
     install = tmp_path / "Custom installation"
     monkeypatch.setattr(sys, "frozen", True, raising=False)
-    monkeypatch.setattr(sys, "executable", str(install / "PDF-Merger-Compressor.exe"))
+    monkeypatch.setattr(sys, "executable", str(install / f"{config.APP_EXE_STEM}.exe"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "AppData"))
     log_file = install / "Logs" / "app.txt"
 

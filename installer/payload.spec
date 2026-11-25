@@ -9,17 +9,19 @@ from PyInstaller.utils.win32.versioninfo import (
 
 project = Path(SPECPATH).parent
 app_config = run_path(str(project / "config.py"))
+app_name = app_config["APP_NAME"]
+exe_stem = app_config["APP_EXE_STEM"]
 app_version = app_config["APP_VERSION"]
 numeric_version = (*map(int, app_version.split(".")), 0)
 version_info = VSVersionInfo(
     ffi=FixedFileInfo(filevers=numeric_version, prodvers=numeric_version),
     kids=[
         StringFileInfo([StringTable("040904B0", [
-            StringStruct("FileDescription", app_config["APP_NAME"]),
+            StringStruct("FileDescription", app_name),
             StringStruct("FileVersion", app_version),
-            StringStruct("InternalName", "PDF-Merger-Compressor"),
-            StringStruct("OriginalFilename", "PDF-Merger-Compressor.exe"),
-            StringStruct("ProductName", "PDF Utility Suite"),
+            StringStruct("InternalName", exe_stem),
+            StringStruct("OriginalFilename", f"{exe_stem}.exe"),
+            StringStruct("ProductName", app_name),
             StringStruct("ProductVersion", app_version),
         ])]),
         VarFileInfo([VarStruct("Translation", [1033, 1200])]),
@@ -42,7 +44,7 @@ exe = EXE(
     analysis.binaries,
     analysis.datas,
     [],
-    name="PDF-Merger-Compressor",
+    name=exe_stem,
     console=False,
     icon=str(assets / "icon.ico"),
     version=version_info,
